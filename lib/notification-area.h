@@ -85,7 +85,7 @@ bare_win_ui_notification__load_icon(bool &owned) {
     path.resize(path.size() * 2);
   }
 
-  return LoadIconW(nullptr, IDI_APPLICATION);
+  return LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
 }
 
 static bool
