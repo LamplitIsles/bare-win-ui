@@ -26,6 +26,7 @@ static bare_t *bare;
 static DispatcherQueue bare__dispatcher = nullptr;
 static std::atomic<bool> bare__running = true;
 static std::atomic<bool> bare__terminating = false;
+static std::atomic<bool> bare__dispatcher_shutdown_requested = false;
 static std::thread bare__poller;
 
 static void
@@ -82,6 +83,22 @@ bare__on_poller_thread(void) {
 
       err = bare_run(bare, UV_RUN_NOWAIT);
       assert(err >= 0);
+
+      if (err == 0) {
+        bare__running = false;
+
+        bool expected = false;
+        if (
+          bare__dispatcher_shutdown_requested.compare_exchange_strong(
+            expected,
+            true
+          )
+        ) {
+          bare__dispatcher.TryEnqueue([]() {
+            bare__dispatcher.ShutdownQueue();
+          });
+        }
+      }
 
       timeout = uv_backend_timeout(bare__loop);
 

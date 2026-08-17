@@ -72,6 +72,15 @@ taskbar recreation seam, or teardown. Its private binding seams exercise
 native user-close and `TaskbarCreated` dispatch without adding application
 policy to the public API.
 
+The runtime's no-window exit path can be checked independently:
+
+```console
+bare-build --base . --host win32-x64 --runtime ./runtime.js --out no-window-build sample-no-window-exit.js
+.\no-window-build\bare-win-ui\App\bare-win-ui.exe
+```
+
+It must exit promptly with code 1 without creating native UI.
+
 ## License
 
 Apache-2.0
