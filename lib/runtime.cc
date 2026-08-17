@@ -95,7 +95,7 @@ bare__on_poller_thread(void) {
           )
         ) {
           bare__dispatcher.TryEnqueue([]() {
-            bare__dispatcher.ShutdownQueue();
+            Application::Current().Exit();
           });
         }
       }
