@@ -67,12 +67,14 @@ const binding = {
   }
 }
 
-require.cache[bindingPath] = {
-  id: bindingPath,
-  filename: bindingPath,
-  loaded: true,
-  exports: binding
-}
+const mainModuleKey = Object.keys(require.cache)[0]
+const mainModule = require.cache[mainModuleKey]
+const bindingIsURL = mainModuleKey.startsWith('file:')
+const bindingURL = new URL(`file://${bindingPath.replaceAll('\\', '/')}`)
+const bindingKey = bindingIsURL ? bindingURL.href : bindingPath
+const bindingModule = new mainModule.constructor(bindingIsURL ? bindingURL : bindingPath)
+bindingModule.exports = binding
+require.cache[bindingKey] = bindingModule
 
 const Window = require('./lib/window')
 const WebView = require('./lib/web-view')
