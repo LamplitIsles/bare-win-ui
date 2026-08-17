@@ -395,7 +395,7 @@ bare_win_ui_window_test_close_request(js_env_t *env, js_callback_info_t *info) {
 
   if (!window->closed) {
     window->programmatic_close = false;
-    window->handle.Close();
+    bare_win_ui_window__on_closing(window);
   }
 
   return nullptr;
