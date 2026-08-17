@@ -3,6 +3,8 @@
 #include <js.h>
 #include <winuser.h>
 
+#include <memory>
+
 #include "element.h"
 #include "windows-app-sdk.h"
 
@@ -15,8 +17,13 @@ struct bare_win_ui_window_t {
   js_ref_t *on_close;
   js_ref_t *on_resize;
 
+  event_token closing_token;
+  event_token closed_token;
+  event_token size_changed_token;
+  bool events_revoked = false;
   bool programmatic_close = false;
   bool closed = false;
+  bool finalized = false;
   bool references_deleted = false;
   float last_width = -1;
   float last_height = -1;
@@ -44,21 +51,43 @@ bare_win_ui_window__delete_references(bare_win_ui_window_t *self) {
 }
 
 static void
-bare_win_ui_window__on_release(js_env_t *env, void *data, void *finalize_hint) {
-  auto self = reinterpret_cast<bare_win_ui_window_t *>(data);
+bare_win_ui_window__revoke_events(bare_win_ui_window_t *self) {
+  if (self->events_revoked) return;
 
-  self->closed = true;
-  self->programmatic_close = true;
-  self->handle.Close();
-  bare_win_ui_window__delete_references(self);
-  delete self;
+  self->events_revoked = true;
+
+  self->handle.AppWindow().Closing(self->closing_token);
+  self->handle.Closed(self->closed_token);
+  self->handle.SizeChanged(self->size_changed_token);
+}
+
+static void
+bare_win_ui_window__on_release(js_env_t *env, void *data, void *finalize_hint) {
+  auto owner = reinterpret_cast<std::shared_ptr<bare_win_ui_window_t> *>(finalize_hint);
+  auto self = owner != nullptr ? owner->get() : reinterpret_cast<bare_win_ui_window_t *>(data);
+
+  if (self != nullptr) {
+    auto was_closed = self->closed;
+
+    self->finalized = true;
+    self->closed = true;
+    self->programmatic_close = true;
+    bare_win_ui_window__revoke_events(self);
+    if (!was_closed) self->handle.Close();
+    bare_win_ui_window__delete_references(self);
+  }
+
+  if (owner != nullptr) {
+    owner->reset();
+    delete owner;
+  }
 }
 
 static bool
 bare_win_ui_window__on_closing(bare_win_ui_window_t *self) {
   int err;
 
-  if (self->closed || self->programmatic_close) return false;
+  if (self->finalized || self->closed || self->programmatic_close) return false;
 
   js_handle_scope_t *scope;
   err = js_open_handle_scope(self->env, &scope);
@@ -91,7 +120,7 @@ static void
 bare_win_ui_window__on_close(bare_win_ui_window_t *self) {
   int err;
 
-  if (self->closed) return;
+  if (self->finalized || self->closed) return;
 
   self->closed = true;
 
@@ -114,13 +143,14 @@ bare_win_ui_window__on_close(bare_win_ui_window_t *self) {
   assert(err == 0);
 
   bare_win_ui_window__delete_references(self);
+  bare_win_ui_window__revoke_events(self);
 }
 
 static void
 bare_win_ui_window__on_resize(bare_win_ui_window_t *self, Size const &size) {
   int err;
 
-  if (self->closed) return;
+  if (self->finalized || self->closed) return;
   if (size.Width == self->last_width && size.Height == self->last_height) return;
 
   self->last_width = size.Width;
@@ -170,7 +200,7 @@ bare_win_ui_window_init(js_env_t *env, js_callback_info_t *info) {
 
   assert(argc == 4);
 
-  auto window = new bare_win_ui_window_t();
+  auto window = std::make_shared<bare_win_ui_window_t>();
 
   window->env = env;
 
@@ -186,20 +216,22 @@ bare_win_ui_window_init(js_env_t *env, js_callback_info_t *info) {
   err = js_create_reference(env, argv[3], 1, &window->on_resize);
   assert(err == 0);
 
-  window->handle.AppWindow().Closing([=](auto &, auto &args) {
-    args.Cancel(bare_win_ui_window__on_closing(window));
+  window->closing_token = window->handle.AppWindow().Closing([window](auto &, auto &args) {
+    args.Cancel(bare_win_ui_window__on_closing(window.get()));
   });
 
-  window->handle.Closed([=](auto &, auto &) {
-    bare_win_ui_window__on_close(window);
+  window->closed_token = window->handle.Closed([window](auto &, auto &) {
+    bare_win_ui_window__on_close(window.get());
   });
 
-  window->handle.SizeChanged([=](auto &, auto &args) {
-    bare_win_ui_window__on_resize(window, args.Size());
+  window->size_changed_token = window->handle.SizeChanged([window](auto &, auto &args) {
+    bare_win_ui_window__on_resize(window.get(), args.Size());
   });
+
+  auto owner = new std::shared_ptr<bare_win_ui_window_t>(window);
 
   js_value_t *result;
-  err = js_create_external(env, window, bare_win_ui_window__on_release, nullptr, &result);
+  err = js_create_external(env, window.get(), bare_win_ui_window__on_release, owner, &result);
   assert(err == 0);
 
   return result;

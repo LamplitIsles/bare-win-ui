@@ -4,6 +4,8 @@
 #include <shellapi.h>
 #include <utf.h>
 
+#include <memory>
+
 #include "windows-app-sdk.h"
 
 struct bare_win_ui_web_view_t {
@@ -19,7 +21,6 @@ struct bare_win_ui_web_view_t {
   bool destroyed = false;
   bool references_deleted = false;
   bool finalized = false;
-  unsigned int pending_operations = 1;
 };
 
 static void
@@ -28,11 +29,13 @@ bare_win_ui_web_view__destroy(bare_win_ui_web_view_t *self) {
 
   self->destroyed = true;
 
-  auto core = self->handle.CoreWebView2();
-  if (core && self->message_handler) {
-    core.WebMessageReceived(self->message_token);
+  if (self->message_handler) {
+    auto core = self->handle.CoreWebView2();
+    if (core) core.WebMessageReceived(self->message_token);
     self->message_handler = false;
   }
+
+  self->handle = nullptr;
 }
 
 static void
@@ -54,25 +57,27 @@ bare_win_ui_web_view__delete_references(bare_win_ui_web_view_t *self) {
 }
 
 static void
-bare_win_ui_web_view__maybe_release(bare_win_ui_web_view_t *self) {
-  if (self->finalized && self->pending_operations == 0) delete self;
-}
-
-static void
 bare_win_ui_web_view__on_release(js_env_t *env, void *data, void *finalize_hint) {
-  auto self = reinterpret_cast<bare_win_ui_web_view_t *>(data);
+  auto owner = reinterpret_cast<std::shared_ptr<bare_win_ui_web_view_t> *>(finalize_hint);
+  auto self = owner != nullptr ? owner->get() : reinterpret_cast<bare_win_ui_web_view_t *>(data);
 
-  self->finalized = true;
-  bare_win_ui_web_view__destroy(self);
-  bare_win_ui_web_view__delete_references(self);
-  bare_win_ui_web_view__maybe_release(self);
+  if (self != nullptr) {
+    self->finalized = true;
+    bare_win_ui_web_view__destroy(self);
+    bare_win_ui_web_view__delete_references(self);
+  }
+
+  if (owner != nullptr) {
+    owner->reset();
+    delete owner;
+  }
 }
 
 static void
 bare_win_ui_web_view__on_message(bare_win_ui_web_view_t *self, hstring const &message) {
   int err;
 
-  if (self->destroyed) return;
+  if (self->finalized || self->destroyed) return;
 
   js_handle_scope_t *scope;
   err = js_open_handle_scope(self->env, &scope);
@@ -103,10 +108,14 @@ bare_win_ui_web_view__on_message(bare_win_ui_web_view_t *self, hstring const &me
 }
 
 static void
-bare_win_ui_web_view__on_ready(bare_win_ui_web_view_t *self, AsyncStatus const &status) {
+bare_win_ui_web_view__on_ready(
+  std::shared_ptr<bare_win_ui_web_view_t> const &owner,
+  AsyncStatus const &status
+) {
   int err;
 
-  if (self->destroyed) return;
+  auto self = owner.get();
+  if (self->finalized || self->destroyed) return;
 
   auto env = self->env;
 
@@ -127,9 +136,9 @@ bare_win_ui_web_view__on_ready(bare_win_ui_web_view_t *self, AsyncStatus const &
   if (status == AsyncStatus::Completed) {
     auto core = self->handle.CoreWebView2();
 
-    self->message_token = core.WebMessageReceived([=](auto &, auto &args) {
+    self->message_token = core.WebMessageReceived([owner](auto &, auto &args) {
       auto message = args.TryGetWebMessageAsString();
-      bare_win_ui_web_view__on_message(self, message);
+      bare_win_ui_web_view__on_message(owner.get(), message);
     });
     self->message_handler = true;
 
@@ -166,7 +175,7 @@ bare_win_ui_web_view_init(js_env_t *env, js_callback_info_t *info) {
 
   assert(argc == 3);
 
-  auto web_view = new bare_win_ui_web_view_t();
+  auto web_view = std::make_shared<bare_win_ui_web_view_t>();
 
   web_view->env = env;
 
@@ -179,21 +188,21 @@ bare_win_ui_web_view_init(js_env_t *env, js_callback_info_t *info) {
   err = js_create_reference(env, argv[2], 1, &web_view->on_message);
   assert(err == 0);
 
+  auto owner = new std::shared_ptr<bare_win_ui_web_view_t>(web_view);
+
   js_value_t *result;
-  err = js_create_external(env, web_view, bare_win_ui_web_view__on_release, nullptr, &result);
+  err = js_create_external(env, web_view.get(), bare_win_ui_web_view__on_release, owner, &result);
   assert(err == 0);
 
   auto req = web_view->handle.EnsureCoreWebView2Async();
 
   DispatcherQueue dispatcher = DispatcherQueue::GetForCurrentThread();
 
-  req.Completed([=](auto &, auto &status) {
+  req.Completed([web_view, dispatcher](auto &, auto &status) {
     auto completion = status;
 
-    dispatcher.TryEnqueue([=] {
+    dispatcher.TryEnqueue([web_view, completion] {
       bare_win_ui_web_view__on_ready(web_view, completion);
-      web_view->pending_operations--;
-      bare_win_ui_web_view__maybe_release(web_view);
     });
   });
 

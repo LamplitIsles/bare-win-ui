@@ -33,6 +33,7 @@ struct bare_win_ui_notification_area_t {
   bool icon_added = false;
   bool destroyed = false;
   bool references_deleted = false;
+  const char *native_error = nullptr;
 
   std::wstring tooltip;
   std::vector<bare_win_ui_notification_item_t> items;
@@ -72,34 +73,75 @@ bare_win_ui_notification__set_icon(bare_win_ui_notification_area_t *self) {
   data.hIcon = self->icon;
   wcsncpy(data.szTip, self->tooltip.c_str(), ARRAYSIZE(data.szTip) - 1);
 
-  if (!Shell_NotifyIconW(NIM_ADD, &data)) return false;
+  if (!Shell_NotifyIconW(NIM_ADD, &data)) {
+    self->native_error = "could not add notification area icon";
+    return false;
+  }
 
-  Shell_NotifyIconW(NIM_SETVERSION, &data);
+  if (!Shell_NotifyIconW(NIM_SETVERSION, &data)) {
+    Shell_NotifyIconW(NIM_DELETE, &data);
+    self->native_error = "could not set notification area icon version";
+    return false;
+  }
+
   self->icon_added = true;
   return true;
 }
 
-static void
+static bool
 bare_win_ui_notification__rebuild_menu(bare_win_ui_notification_area_t *self) {
-  if (self->menu != nullptr) DestroyMenu(self->menu);
+  auto menu = CreatePopupMenu();
+  if (menu == nullptr) {
+    self->native_error = "could not create notification area menu";
+    return false;
+  }
 
-  self->menu = CreatePopupMenu();
-  self->commands.clear();
+  std::unordered_map<UINT, std::wstring> commands;
 
   for (auto &item : self->items) {
     if (item.separator) {
-      AppendMenuW(self->menu, MF_SEPARATOR, 0, nullptr);
+      if (!AppendMenuW(menu, MF_SEPARATOR, 0, nullptr)) {
+        DestroyMenu(menu);
+        self->native_error = "could not add notification area separator";
+        return false;
+      }
       continue;
     }
 
     item.command = self->next_command++;
-    self->commands[item.command] = item.id;
+    commands[item.command] = item.id;
 
     UINT flags = MF_STRING;
     if (!item.enabled) flags |= MF_GRAYED;
 
-    AppendMenuW(self->menu, flags, item.command, item.title.c_str());
+    if (!AppendMenuW(menu, flags, item.command, item.title.c_str())) {
+      DestroyMenu(menu);
+      self->native_error = "could not add notification area item";
+      return false;
+    }
   }
+
+  if (self->menu != nullptr && !DestroyMenu(self->menu)) {
+    DestroyMenu(menu);
+    self->native_error = "could not replace notification area menu";
+    return false;
+  }
+
+  self->menu = menu;
+  self->commands = std::move(commands);
+  return true;
+}
+
+static bool
+bare_win_ui_notification__can_mutate(js_env_t *env, bare_win_ui_notification_area_t *self) {
+  if (self->destroyed) return false;
+
+  if (self->native_error != nullptr) {
+    js_throw_error(env, "ERR_NATIVE_OPERATION", self->native_error);
+    return false;
+  }
+
+  return true;
 }
 
 static void
@@ -107,10 +149,17 @@ bare_win_ui_notification__show_menu(bare_win_ui_notification_area_t *self) {
   if (self->destroyed || self->menu == nullptr) return;
 
   POINT point;
-  GetCursorPos(&point);
-  SetForegroundWindow(self->window);
+  if (!GetCursorPos(&point)) {
+    self->native_error = "could not get notification area menu position";
+    return;
+  }
 
-  TrackPopupMenu(
+  if (!SetForegroundWindow(self->window)) {
+    self->native_error = "could not activate notification area menu";
+    return;
+  }
+
+  if (!TrackPopupMenu(
     self->menu,
     TPM_RIGHTALIGN | TPM_BOTTOMALIGN,
     point.x,
@@ -118,9 +167,14 @@ bare_win_ui_notification__show_menu(bare_win_ui_notification_area_t *self) {
     0,
     self->window,
     nullptr
-  );
+  )) {
+    self->native_error = "could not show notification area menu";
+    return;
+  }
 
-  PostMessageW(self->window, WM_NULL, 0, 0);
+  if (!PostMessageW(self->window, WM_NULL, 0, 0)) {
+    self->native_error = "could not complete notification area menu";
+  }
 }
 
 static void
@@ -159,9 +213,9 @@ bare_win_ui_notification__on_select(bare_win_ui_notification_area_t *self, UINT 
   assert(err == 0);
 }
 
-static void
+static bool
 bare_win_ui_notification__destroy(bare_win_ui_notification_area_t *self) {
-  if (self->destroyed) return;
+  if (self->destroyed) return self->native_error == nullptr;
 
   self->destroyed = true;
 
@@ -170,19 +224,27 @@ bare_win_ui_notification__destroy(bare_win_ui_notification_area_t *self) {
     data.cbSize = sizeof(data);
     data.hWnd = self->window;
     data.uID = 1;
-    Shell_NotifyIconW(NIM_DELETE, &data);
+    if (!Shell_NotifyIconW(NIM_DELETE, &data) && self->native_error == nullptr) {
+      self->native_error = "could not remove notification area icon";
+    }
     self->icon_added = false;
   }
 
   if (self->menu != nullptr) {
-    DestroyMenu(self->menu);
+    if (!DestroyMenu(self->menu) && self->native_error == nullptr) {
+      self->native_error = "could not destroy notification area menu";
+    }
     self->menu = nullptr;
   }
 
   if (self->window != nullptr) {
-    DestroyWindow(self->window);
+    if (!DestroyWindow(self->window) && self->native_error == nullptr) {
+      self->native_error = "could not destroy notification area window";
+    }
     self->window = nullptr;
   }
+
+  return self->native_error == nullptr;
 }
 
 static LRESULT CALLBACK
@@ -199,7 +261,14 @@ bare_win_ui_notification__window_proc(HWND hwnd, UINT message, WPARAM wparam, LP
 
   if (self == nullptr) return DefWindowProcW(hwnd, message, wparam, lparam);
 
+  if (message == WM_NCDESTROY) {
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+  }
+
   if (message == self->taskbar_created) {
+    if (self->destroyed) return 0;
+
+    self->icon_added = false;
     bare_win_ui_notification__set_icon(self);
     return 0;
   }
@@ -311,7 +380,14 @@ bare_win_ui_notification_area_init(js_env_t *env, js_callback_info_t *info) {
     return nullptr;
   }
 
-  bare_win_ui_notification__rebuild_menu(self);
+  if (!bare_win_ui_notification__rebuild_menu(self)) {
+    js_throw_error(env, "ERR_NATIVE_SETUP", self->native_error);
+    bare_win_ui_notification__destroy(self);
+    js_delete_reference(env, self->on_select);
+    js_delete_reference(env, self->ctx);
+    delete self;
+    return nullptr;
+  }
 
   js_value_t *result;
   err = js_create_external(env, self, bare_win_ui_notification_area__on_release, nullptr, &result);
@@ -346,6 +422,8 @@ bare_win_ui_notification_area_add_item(js_env_t *env, js_callback_info_t *info) 
   err = js_get_value_external(env, argv[0], (void **) &self);
   assert(err == 0);
 
+  if (!bare_win_ui_notification__can_mutate(env, self)) return nullptr;
+
   bare_win_ui_notification_item_t item;
   item.separator = false;
   item.command = 0;
@@ -358,7 +436,9 @@ bare_win_ui_notification_area_add_item(js_env_t *env, js_callback_info_t *info) 
   }
 
   self->items.push_back(std::move(item));
-  bare_win_ui_notification__rebuild_menu(self);
+  if (!bare_win_ui_notification__rebuild_menu(self)) {
+    js_throw_error(env, "ERR_NATIVE_OPERATION", self->native_error);
+  }
   return nullptr;
 }
 
@@ -375,8 +455,12 @@ bare_win_ui_notification_area_add_separator(js_env_t *env, js_callback_info_t *i
   err = js_get_value_external(env, argv[0], (void **) &self);
   assert(err == 0);
 
+  if (!bare_win_ui_notification__can_mutate(env, self)) return nullptr;
+
   self->items.push_back({L"", L"", 0, true, false});
-  bare_win_ui_notification__rebuild_menu(self);
+  if (!bare_win_ui_notification__rebuild_menu(self)) {
+    js_throw_error(env, "ERR_NATIVE_OPERATION", self->native_error);
+  }
   return nullptr;
 }
 
@@ -393,6 +477,8 @@ bare_win_ui_notification_area_update_item(js_env_t *env, js_callback_info_t *inf
   err = js_get_value_external(env, argv[0], (void **) &self);
   assert(err == 0);
 
+  if (!bare_win_ui_notification__can_mutate(env, self)) return nullptr;
+
   std::wstring id;
   std::wstring title;
   bool enabled;
@@ -408,7 +494,9 @@ bare_win_ui_notification_area_update_item(js_env_t *env, js_callback_info_t *inf
     if (!item.separator && item.id == id) {
       item.title = title;
       item.enabled = enabled;
-      bare_win_ui_notification__rebuild_menu(self);
+      if (!bare_win_ui_notification__rebuild_menu(self)) {
+        js_throw_error(env, "ERR_NATIVE_OPERATION", self->native_error);
+      }
       return nullptr;
     }
   }
@@ -430,6 +518,8 @@ bare_win_ui_notification_area_remove_item(js_env_t *env, js_callback_info_t *inf
   err = js_get_value_external(env, argv[0], (void **) &self);
   assert(err == 0);
 
+  if (!bare_win_ui_notification__can_mutate(env, self)) return nullptr;
+
   std::wstring id;
   if (!bare_win_ui_notification__get_string(env, argv[1], id)) {
     js_throw_error(env, "ERR_INVALID_ARGUMENT", "notification item ID is required");
@@ -439,7 +529,9 @@ bare_win_ui_notification_area_remove_item(js_env_t *env, js_callback_info_t *inf
   for (auto it = self->items.begin(); it != self->items.end(); ++it) {
     if (!it->separator && it->id == id) {
       self->items.erase(it);
-      bare_win_ui_notification__rebuild_menu(self);
+      if (!bare_win_ui_notification__rebuild_menu(self)) {
+        js_throw_error(env, "ERR_NATIVE_OPERATION", self->native_error);
+      }
       return nullptr;
     }
   }
@@ -460,8 +552,12 @@ bare_win_ui_notification_area_clear(js_env_t *env, js_callback_info_t *info) {
   err = js_get_value_external(env, argv[0], (void **) &self);
   assert(err == 0);
 
+  if (!bare_win_ui_notification__can_mutate(env, self)) return nullptr;
+
   self->items.clear();
-  bare_win_ui_notification__rebuild_menu(self);
+  if (!bare_win_ui_notification__rebuild_menu(self)) {
+    js_throw_error(env, "ERR_NATIVE_OPERATION", self->native_error);
+  }
   return nullptr;
 }
 
@@ -478,7 +574,9 @@ bare_win_ui_notification_area_destroy(js_env_t *env, js_callback_info_t *info) {
   err = js_get_value_external(env, argv[0], (void **) &self);
   assert(err == 0);
 
-  bare_win_ui_notification__destroy(self);
+  auto ok = bare_win_ui_notification__destroy(self);
   bare_win_ui_notification_area__delete_references(self);
+
+  if (!ok) js_throw_error(env, "ERR_NATIVE_OPERATION", self->native_error);
   return nullptr;
 }
