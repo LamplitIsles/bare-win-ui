@@ -30,6 +30,7 @@ bare_win_ui_exports(js_env_t *env, js_value_t *exports) {
   V("windowActivate", bare_win_ui_window_activate)
   V("windowHide", bare_win_ui_window_hide)
   V("windowClose", bare_win_ui_window_close)
+  V("windowTestCloseRequest", bare_win_ui_window_test_close_request)
   V("windowResize", bare_win_ui_window_resize)
   V("windowResizeClient", bare_win_ui_window_resize_client)
 
@@ -50,6 +51,8 @@ bare_win_ui_exports(js_env_t *env, js_value_t *exports) {
   V("notificationAreaUpdateItem", bare_win_ui_notification_area_update_item)
   V("notificationAreaRemoveItem", bare_win_ui_notification_area_remove_item)
   V("notificationAreaClear", bare_win_ui_notification_area_clear)
+  V("notificationAreaTestSelect", bare_win_ui_notification_area_test_select)
+  V("notificationAreaTestTaskbarCreated", bare_win_ui_notification_area_test_taskbar_created)
   V("notificationAreaDestroy", bare_win_ui_notification_area_destroy)
 #undef V
 

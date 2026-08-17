@@ -378,6 +378,30 @@ bare_win_ui_window_close(js_env_t *env, js_callback_info_t *info) {
 }
 
 static js_value_t *
+bare_win_ui_window_test_close_request(js_env_t *env, js_callback_info_t *info) {
+  int err;
+
+  size_t argc = 1;
+  js_value_t *argv[1];
+
+  err = js_get_callback_info(env, info, &argc, argv, nullptr, nullptr);
+  assert(err == 0);
+
+  assert(argc == 1);
+
+  bare_win_ui_window_t *window;
+  err = js_get_value_external(env, argv[0], (void **) &window);
+  assert(err == 0);
+
+  if (!window->closed) {
+    window->programmatic_close = false;
+    window->handle.Close();
+  }
+
+  return nullptr;
+}
+
+static js_value_t *
 bare_win_ui_window_resize(js_env_t *env, js_callback_info_t *info) {
   int err;
 

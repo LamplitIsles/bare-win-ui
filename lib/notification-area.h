@@ -567,6 +567,68 @@ bare_win_ui_notification_area_clear(js_env_t *env, js_callback_info_t *info) {
 }
 
 static js_value_t *
+bare_win_ui_notification_area_test_select(js_env_t *env, js_callback_info_t *info) {
+  int err;
+  size_t argc = 2;
+  js_value_t *argv[2];
+  err = js_get_callback_info(env, info, &argc, argv, nullptr, nullptr);
+  assert(err == 0);
+  assert(argc == 2);
+
+  bare_win_ui_notification_area_t *self;
+  err = js_get_value_external(env, argv[0], (void **) &self);
+  assert(err == 0);
+
+  if (self->destroyed) return nullptr;
+
+  std::wstring id;
+  if (!bare_win_ui_notification__get_string(env, argv[1], id)) {
+    js_throw_error(env, "ERR_INVALID_ARGUMENT", "notification item ID is required");
+    return nullptr;
+  }
+
+  for (auto const &[command, item_id] : self->commands) {
+    if (item_id == id) {
+      SendMessageW(self->window, WM_COMMAND, command, 0);
+      return nullptr;
+    }
+  }
+
+  js_throw_error(env, "ERR_NOT_FOUND", "notification item does not exist");
+  return nullptr;
+}
+
+static js_value_t *
+bare_win_ui_notification_area_test_taskbar_created(js_env_t *env, js_callback_info_t *info) {
+  int err;
+  size_t argc = 1;
+  js_value_t *argv[1];
+  err = js_get_callback_info(env, info, &argc, argv, nullptr, nullptr);
+  assert(err == 0);
+  assert(argc == 1);
+
+  bare_win_ui_notification_area_t *self;
+  err = js_get_value_external(env, argv[0], (void **) &self);
+  assert(err == 0);
+
+  if (self->destroyed) return nullptr;
+
+  NOTIFYICONDATAW data = {};
+  data.cbSize = sizeof(data);
+  data.hWnd = self->window;
+  data.uID = 1;
+  Shell_NotifyIconW(NIM_DELETE, &data);
+  self->icon_added = false;
+
+  SendMessageW(self->window, self->taskbar_created, 0, 0);
+  if (!self->icon_added) {
+    js_throw_error(env, "ERR_NATIVE_OPERATION", self->native_error);
+  }
+
+  return nullptr;
+}
+
+static js_value_t *
 bare_win_ui_notification_area_destroy(js_env_t *env, js_callback_info_t *info) {
   int err;
   size_t argc = 1;

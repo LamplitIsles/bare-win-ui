@@ -52,6 +52,24 @@ window.show()
 
 The module contains no application-specific labels or lifecycle policy.
 
+## Integrated native check
+
+From this package directory on the Windows build host, build the local x64
+prebuild and run the real primitives together:
+
+```console
+bare-make generate --source . --build build --platform win32 --arch x64
+bare-make build --build build
+bare-make install --build build --prefix prebuilds
+bare-build --base . --host win32-x64 --runtime ./runtime --out sample-build sample.js
+.\\sample-build\\bare-win-ui\\App\\bare-win-ui.exe
+```
+
+The sample exits nonzero on a failed readiness/message exchange, intercepted
+close, native menu selection, taskbar recreation seam, or teardown. Its
+private binding seams exercise native user-close and `TaskbarCreated` dispatch
+without adding application policy to the public API.
+
 ## License
 
 Apache-2.0
