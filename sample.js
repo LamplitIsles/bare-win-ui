@@ -96,8 +96,11 @@ async function main() {
   await pageAck
 
   binding.windowTestCloseRequest(window._handle)
-  check(closeEvents === 0, 'intercepted close destroyed the window')
+  check(closeEvents === 0, 'native close request destroyed the window')
   window.show()
+
+  binding.windowTestCloseRequest(window._handle)
+  check(closeEvents === 0, 'same window could not be shown after close request')
 
   binding.notificationAreaTestTaskbarCreated(notificationArea._handle)
   binding.notificationAreaTestSelect(notificationArea._handle, 'open')

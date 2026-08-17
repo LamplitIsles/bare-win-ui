@@ -19,8 +19,9 @@ order. Page messages are emitted as `message` events. `openExternal()` accepts
 only `http:` and `https:` URLs and uses the system handler. `destroy()` is
 idempotent, releases the native control, and prevents later callbacks.
 
-`NotificationArea` uses the default application icon and exposes mutable menu
-items through stable string IDs:
+`NotificationArea` uses the packaged executable's icon when one is available;
+otherwise it uses Windows' shared default application icon. It exposes mutable
+menu items through stable string IDs:
 
 ```js
 const tray = new NotificationArea({ tooltip: 'Example' })
@@ -65,10 +66,11 @@ bare-build --base . --host win32-x64 --runtime ./runtime.js --out sample-build s
 .\\sample-build\\bare-win-ui\\App\\bare-win-ui.exe
 ```
 
-The sample exits nonzero on a failed readiness/message exchange, intercepted
-close, native menu selection, taskbar recreation seam, or teardown. Its
-private binding seams exercise native user-close and `TaskbarCreated` dispatch
-without adding application policy to the public API.
+The sample exits nonzero on a failed readiness/message exchange, native close
+request cancellation and reuse of the same window, native menu selection,
+taskbar recreation seam, or teardown. Its private binding seams exercise
+native user-close and `TaskbarCreated` dispatch without adding application
+policy to the public API.
 
 ## License
 

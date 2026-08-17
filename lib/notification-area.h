@@ -28,6 +28,7 @@ struct bare_win_ui_notification_area_t {
   HWND window = nullptr;
   HMENU menu = nullptr;
   HICON icon = nullptr;
+  bool icon_owned = false;
   UINT taskbar_created = 0;
   UINT next_command = 1;
   bool icon_added = false;
@@ -59,6 +60,32 @@ bare_win_ui_notification__ensure_class() {
 
   atom = RegisterClassExW(&klass);
   return atom != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+}
+
+static HICON
+bare_win_ui_notification__load_icon(bool &owned) {
+  owned = false;
+
+  std::vector<wchar_t> path(MAX_PATH);
+  for (;;) {
+    DWORD length = GetModuleFileNameW(
+      nullptr,
+      path.data(),
+      static_cast<DWORD>(path.size())
+    );
+    if (length == 0) break;
+    if (length < path.size()) {
+      HICON icon = nullptr;
+      if (ExtractIconExW(path.data(), 0, &icon, nullptr, 1) == 1 && icon != nullptr) {
+        owned = true;
+        return icon;
+      }
+      break;
+    }
+    path.resize(path.size() * 2);
+  }
+
+  return LoadIconW(nullptr, IDI_APPLICATION);
 }
 
 static bool
@@ -249,6 +276,14 @@ bare_win_ui_notification__destroy(bare_win_ui_notification_area_t *self) {
     self->window = nullptr;
   }
 
+  if (self->icon_owned && self->icon != nullptr) {
+    if (!DestroyIcon(self->icon) && self->native_error == nullptr) {
+      self->native_error = "could not destroy notification area icon";
+    }
+  }
+  self->icon = nullptr;
+  self->icon_owned = false;
+
   return self->native_error == nullptr;
 }
 
@@ -375,7 +410,7 @@ bare_win_ui_notification_area_init(js_env_t *env, js_callback_info_t *info) {
     return nullptr;
   }
 
-  self->icon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
+  self->icon = bare_win_ui_notification__load_icon(self->icon_owned);
   if (self->icon == nullptr || !bare_win_ui_notification__set_icon(self)) {
     js_throw_error(env, "ERR_NATIVE_SETUP", "could not add notification area icon");
     bare_win_ui_notification__destroy(self);

@@ -394,8 +394,13 @@ bare_win_ui_window_test_close_request(js_env_t *env, js_callback_info_t *info) {
   assert(err == 0);
 
   if (!window->closed) {
-    window->programmatic_close = false;
-    bare_win_ui_window__on_closing(window);
+    auto hwnd = GetWindowFromWindowId(window->handle.AppWindow().Id());
+    if (hwnd == nullptr) {
+      js_throw_error(env, "ERR_NATIVE_OPERATION", "could not find native window");
+      return nullptr;
+    }
+
+    SendMessageW(hwnd, WM_SYSCOMMAND, SC_CLOSE, 0);
   }
 
   return nullptr;
