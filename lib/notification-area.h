@@ -71,7 +71,12 @@ bare_win_ui_notification__set_icon(bare_win_ui_notification_area_t *self) {
   data.uCallbackMessage = bare_win_ui_notification__message;
   data.uVersion = NOTIFYICON_VERSION_4;
   data.hIcon = self->icon;
-  wcsncpy(data.szTip, self->tooltip.c_str(), ARRAYSIZE(data.szTip) - 1);
+  wcsncpy_s(
+    data.szTip,
+    ARRAYSIZE(data.szTip),
+    self->tooltip.c_str(),
+    _TRUNCATE
+  );
 
   if (!Shell_NotifyIconW(NIM_ADD, &data)) {
     self->native_error = "could not add notification area icon";
@@ -370,7 +375,7 @@ bare_win_ui_notification_area_init(js_env_t *env, js_callback_info_t *info) {
     return nullptr;
   }
 
-  self->icon = LoadIconW(nullptr, IDI_APPLICATION);
+  self->icon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
   if (self->icon == nullptr || !bare_win_ui_notification__set_icon(self)) {
     js_throw_error(env, "ERR_NATIVE_SETUP", "could not add notification area icon");
     bare_win_ui_notification__destroy(self);
