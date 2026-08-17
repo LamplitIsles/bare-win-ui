@@ -3,6 +3,7 @@
 #include <js.h>
 #include <shellapi.h>
 #include <utf.h>
+#include <windowsx.h>
 
 #include <cwchar>
 #include <string>
@@ -94,7 +95,7 @@ bare_win_ui_notification__set_icon(bare_win_ui_notification_area_t *self) {
   data.cbSize = sizeof(data);
   data.hWnd = self->window;
   data.uID = 1;
-  data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+  data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
   data.uCallbackMessage = bare_win_ui_notification__message;
   data.uVersion = NOTIFYICON_VERSION_4;
   data.hIcon = self->icon;
@@ -177,14 +178,11 @@ bare_win_ui_notification__can_mutate(js_env_t *env, bare_win_ui_notification_are
 }
 
 static void
-bare_win_ui_notification__show_menu(bare_win_ui_notification_area_t *self) {
+bare_win_ui_notification__show_menu(
+  bare_win_ui_notification_area_t *self,
+  POINT point
+) {
   if (self->destroyed || self->menu == nullptr) return;
-
-  POINT point;
-  if (!GetCursorPos(&point)) {
-    self->native_error = "could not get notification area menu position";
-    return;
-  }
 
   if (!SetForegroundWindow(self->window)) {
     self->native_error = "could not activate notification area menu";
@@ -206,7 +204,14 @@ bare_win_ui_notification__show_menu(bare_win_ui_notification_area_t *self) {
 
   if (!PostMessageW(self->window, WM_NULL, 0, 0)) {
     self->native_error = "could not complete notification area menu";
+    return;
   }
+
+  NOTIFYICONDATAW focus = {};
+  focus.cbSize = sizeof(focus);
+  focus.hWnd = self->window;
+  focus.uID = 1;
+  Shell_NotifyIconW(NIM_SETFOCUS, &focus);
 }
 
 static void
@@ -314,8 +319,19 @@ bare_win_ui_notification__window_proc(HWND hwnd, UINT message, WPARAM wparam, LP
   }
 
   if (message == bare_win_ui_notification__message) {
-    if (lparam == WM_RBUTTONUP || lparam == WM_CONTEXTMENU) {
-      bare_win_ui_notification__show_menu(self);
+    auto event = LOWORD(lparam);
+    auto icon_id = HIWORD(lparam);
+    if (icon_id != 1) return 0;
+
+    if (
+      event == WM_LBUTTONUP ||
+      event == WM_RBUTTONUP ||
+      event == WM_CONTEXTMENU ||
+      event == NIN_SELECT ||
+      event == NIN_KEYSELECT
+    ) {
+      POINT point = {GET_X_LPARAM(wparam), GET_Y_LPARAM(wparam)};
+      bare_win_ui_notification__show_menu(self, point);
     }
     return 0;
   }
