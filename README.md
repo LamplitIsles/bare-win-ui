@@ -61,7 +61,7 @@ prebuild and run the real primitives together:
 bare-make generate --source . --build build --platform win32 --arch x64
 bare-make build --build build
 bare-make install --build build --prefix prebuilds
-bare-build --base . --host win32-x64 --runtime ./runtime --out sample-build sample.js
+bare-build --base . --host win32-x64 --runtime ./runtime.js --out sample-build sample.js
 .\\sample-build\\bare-win-ui\\App\\bare-win-ui.exe
 ```
 
