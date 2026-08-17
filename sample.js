@@ -1,4 +1,3 @@
-const process = require('bare-process')
 const { once } = require('bare-events')
 
 const binding = require('./binding')
@@ -45,7 +44,7 @@ function shutdown(code) {
 
   setTimeout(() => {
     if (closeEvents !== 1) code = 1
-    process.exit(code)
+    Bare.exit(code)
   }, 0)
 }
 
