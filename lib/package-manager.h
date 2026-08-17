@@ -110,15 +110,24 @@ bare_win_ui_package_manager_add_package__on_completed(bare_win_ui_package_manage
 
   js_value_t *args[1];
 
-  auto result = self->handle.GetResults();
-
   if (status == AsyncStatus::Error) {
+    auto result = self->handle.GetResults();
     auto error = result.ErrorText();
 
     err = js_create_string_utf16le(env, reinterpret_cast<const utf16_t *>(error.data()), error.size(), &args[0]);
     assert(err == 0);
-  } else {
+  } else if (status == AsyncStatus::Completed) {
     err = js_get_null(env, &args[0]);
+    assert(err == 0);
+  } else {
+    wchar_t const error[] = L"Package installation was canceled";
+
+    err = js_create_string_utf16le(
+      env,
+      reinterpret_cast<const utf16_t *>(error),
+      sizeof(error) / sizeof(error[0]) - 1,
+      &args[0]
+    );
     assert(err == 0);
   }
 

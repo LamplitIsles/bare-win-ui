@@ -34,6 +34,7 @@ target_link_libraries(
   ${bare_win_ui}
   PUBLIC
     WindowsAppSDK
+    shell32
 )
 
 add_executable(bare_runtime)
