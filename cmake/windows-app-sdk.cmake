@@ -1,12 +1,15 @@
 include(ExternalProject)
 
 function(fetch_nuget_package name version result)
+  set(one_value_keywords
+    SHA256
+  )
   set(multi_value_keywords
     BUILD_COMMAND
   )
 
   cmake_parse_arguments(
-    PARSE_ARGV 3 ARGV "" "" "${multi_value_keywords}"
+    PARSE_ARGV 3 ARGV "" "${one_value_keywords}" "${multi_value_keywords}"
   )
 
   set(prefix "${CMAKE_CURRENT_BINARY_DIR}/_nuget/${name}/${version}")
@@ -26,10 +29,32 @@ function(fetch_nuget_package name version result)
     set(ARGV_BUILD_COMMAND "")
   endif()
 
+  set(package_url "https://www.nuget.org/api/v2/package/${name}/${version}")
+  set(package_hash_arguments)
+  if(ARGV_SHA256)
+    list(APPEND package_hash_arguments URL_HASH "SHA256=${ARGV_SHA256}")
+  endif()
+  if(DEFINED ENV{BARE_WIN_UI_NUGET_CACHE})
+    file(TO_CMAKE_PATH "$ENV{BARE_WIN_UI_NUGET_CACHE}" package_cache)
+    set(cached_package "${package_cache}/${name}.${version}.nupkg")
+    if(EXISTS "${cached_package}")
+      if(ARGV_SHA256)
+        file(SHA256 "${cached_package}" cached_package_sha256)
+      endif()
+      if(NOT ARGV_SHA256 OR "${cached_package_sha256}" STREQUAL "${ARGV_SHA256}")
+        message(STATUS "Using verified cached NuGet package: ${cached_package}")
+        set(package_url "${cached_package}")
+      else()
+        message(WARNING "Ignoring cached NuGet package with invalid SHA-256: ${cached_package}")
+      endif()
+    endif()
+  endif()
+
   ExternalProject_Add(
     ${target}
     PREFIX "${prefix}"
-    URL "https://www.nuget.org/api/v2/package/${name}/${version}"
+    URL "${package_url}"
+    ${package_hash_arguments}
     CONFIGURE_COMMAND ""
     INSTALL_COMMAND ""
     BUILD_COMMAND ${ARGV_BUILD_COMMAND}
@@ -168,6 +193,7 @@ fetch_nuget_package(
   Microsoft.WindowsAppSDK.Runtime
   1.8.251106002
   WindowsAppSDK_Runtime
+  SHA256 6615d3073104c93840492c94480d2ddadb303f401f775c9bcab2f0d9134df8f3
   BUILD_COMMAND
     "${CppWinRT_SOURCE_DIR}/bin/cppwinrt.exe"
     -ref sdk
