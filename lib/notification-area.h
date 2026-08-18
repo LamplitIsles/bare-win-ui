@@ -191,7 +191,7 @@ bare_win_ui_notification__show_menu(
 
   if (!TrackPopupMenu(
     self->menu,
-    TPM_RIGHTALIGN | TPM_BOTTOMALIGN,
+    TPM_RIGHTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON,
     point.x,
     point.y,
     0,
@@ -404,15 +404,15 @@ bare_win_ui_notification_area_init(js_env_t *env, js_callback_info_t *info) {
   }
 
   self->window = CreateWindowExW(
-    0,
+    WS_EX_TOOLWINDOW,
     bare_win_ui_notification__class_name,
     L"Bare WinUI notification area",
+    WS_POPUP,
     0,
     0,
     0,
     0,
-    0,
-    HWND_MESSAGE,
+    nullptr,
     nullptr,
     GetModuleHandleW(nullptr),
     self
