@@ -119,7 +119,6 @@ async function verifyPendingWebViewTeardown() {
 
 async function main() {
   await verifyPendingWebViewTeardown()
-  await verifyPartialConstructionFailure()
 
   window = new Window()
   webView = new WebView()
@@ -178,6 +177,7 @@ async function main() {
   binding.notificationAreaTestSelect(notificationArea._handle, 'open')
   check(selected === 'open', 'notification menu selection was not delivered')
 
+  await verifyPartialConstructionFailure()
   binding.notificationAreaTestSelect(notificationArea._handle, 'quit')
 }
 
