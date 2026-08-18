@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "icon.h"
 #include "windows-app-sdk.h"
 
 struct bare_win_ui_notification_item_t {
@@ -65,8 +66,16 @@ bare_win_ui_notification__ensure_class() {
 
 static HICON
 bare_win_ui_notification__load_icon(bool &owned) {
-  owned = false;
+  auto packaged = bare_win_ui_load_packaged_icon(
+    GetSystemMetrics(SM_CXSMICON),
+    GetSystemMetrics(SM_CYSMICON)
+  );
+  if (packaged != nullptr) {
+    owned = true;
+    return packaged;
+  }
 
+  owned = false;
   std::vector<wchar_t> path(MAX_PATH);
   for (;;) {
     DWORD length = GetModuleFileNameW(

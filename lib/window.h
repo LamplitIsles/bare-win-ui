@@ -6,6 +6,7 @@
 #include <memory>
 
 #include "element.h"
+#include "icon.h"
 #include "windows-app-sdk.h"
 
 struct bare_win_ui_window_t {
@@ -25,6 +26,8 @@ struct bare_win_ui_window_t {
   bool closed = false;
   bool finalized = false;
   bool references_deleted = false;
+  HICON large_icon = nullptr;
+  HICON small_icon = nullptr;
   float last_width = -1;
   float last_height = -1;
 };
@@ -62,6 +65,24 @@ bare_win_ui_window__revoke_events(bare_win_ui_window_t *self) {
 }
 
 static void
+bare_win_ui_window__destroy_icons(bare_win_ui_window_t *self) {
+  auto hwnd = GetWindowFromWindowId(self->handle.AppWindow().Id());
+  if (hwnd != nullptr) {
+    SendMessageW(hwnd, WM_SETICON, ICON_BIG, 0);
+    SendMessageW(hwnd, WM_SETICON, ICON_SMALL, 0);
+  }
+
+  if (self->large_icon != nullptr) {
+    DestroyIcon(self->large_icon);
+    self->large_icon = nullptr;
+  }
+  if (self->small_icon != nullptr) {
+    DestroyIcon(self->small_icon);
+    self->small_icon = nullptr;
+  }
+}
+
+static void
 bare_win_ui_window__on_release(js_env_t *env, void *data, void *finalize_hint) {
   auto owner = reinterpret_cast<std::shared_ptr<bare_win_ui_window_t> *>(finalize_hint);
   auto self = owner != nullptr ? owner->get() : reinterpret_cast<bare_win_ui_window_t *>(data);
@@ -73,6 +94,7 @@ bare_win_ui_window__on_release(js_env_t *env, void *data, void *finalize_hint) {
     self->closed = true;
     self->programmatic_close = true;
     bare_win_ui_window__revoke_events(self);
+    bare_win_ui_window__destroy_icons(self);
     if (!was_closed) self->handle.Close();
     bare_win_ui_window__delete_references(self);
   }
@@ -123,6 +145,7 @@ bare_win_ui_window__on_close(bare_win_ui_window_t *self) {
   if (self->finalized || self->closed) return;
 
   self->closed = true;
+  bare_win_ui_window__destroy_icons(self);
 
   js_handle_scope_t *scope;
   err = js_open_handle_scope(self->env, &scope);
@@ -227,6 +250,24 @@ bare_win_ui_window_init(js_env_t *env, js_callback_info_t *info) {
   window->size_changed_token = window->handle.SizeChanged([window](auto &, auto &args) {
     bare_win_ui_window__on_resize(window.get(), args.Size());
   });
+
+  auto hwnd = GetWindowFromWindowId(window->handle.AppWindow().Id());
+  if (hwnd != nullptr) {
+    window->large_icon = bare_win_ui_load_packaged_icon(
+      GetSystemMetrics(SM_CXICON),
+      GetSystemMetrics(SM_CYICON)
+    );
+    window->small_icon = bare_win_ui_load_packaged_icon(
+      GetSystemMetrics(SM_CXSMICON),
+      GetSystemMetrics(SM_CYSMICON)
+    );
+    if (window->large_icon != nullptr) {
+      SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(window->large_icon));
+    }
+    if (window->small_icon != nullptr) {
+      SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(window->small_icon));
+    }
+  }
 
   auto owner = new std::shared_ptr<bare_win_ui_window_t>(window);
 
