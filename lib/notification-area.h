@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <atomic>
 #include <bare.h>
 #include <js.h>
 #include <shellapi.h>
@@ -42,6 +43,9 @@ struct bare_win_ui_notification_area_t {
   std::vector<bare_win_ui_notification_item_t> items;
   std::unordered_map<UINT, std::wstring> commands;
 };
+
+static std::atomic<int32_t> bare_win_ui_notification__test_live_resources = 0;
+static std::atomic<bool> bare_win_ui_notification__test_fail_init = false;
 
 static constexpr UINT bare_win_ui_notification__message = WM_APP + 1;
 static constexpr wchar_t bare_win_ui_notification__class_name[] = L"BareWinUINotificationArea";
@@ -99,6 +103,11 @@ bare_win_ui_notification__load_icon(bool &owned) {
 }
 
 static bool
+bare_win_ui_notification__test_should_fail_init() {
+  return bare_win_ui_notification__test_fail_init.exchange(false);
+}
+
+static bool
 bare_win_ui_notification__set_icon(bare_win_ui_notification_area_t *self) {
   NOTIFYICONDATAW data = {};
   data.cbSize = sizeof(data);
@@ -137,6 +146,7 @@ bare_win_ui_notification__rebuild_menu(bare_win_ui_notification_area_t *self) {
     self->native_error = "could not create notification area menu";
     return false;
   }
+  bare_win_ui_notification__test_live_resources++;
 
   std::unordered_map<UINT, std::wstring> commands;
 
@@ -144,6 +154,7 @@ bare_win_ui_notification__rebuild_menu(bare_win_ui_notification_area_t *self) {
     if (item.separator) {
       if (!AppendMenuW(menu, MF_SEPARATOR, 0, nullptr)) {
         DestroyMenu(menu);
+        bare_win_ui_notification__test_live_resources--;
         self->native_error = "could not add notification area separator";
         return false;
       }
@@ -158,15 +169,20 @@ bare_win_ui_notification__rebuild_menu(bare_win_ui_notification_area_t *self) {
 
     if (!AppendMenuW(menu, flags, item.command, item.title.c_str())) {
       DestroyMenu(menu);
+      bare_win_ui_notification__test_live_resources--;
       self->native_error = "could not add notification area item";
       return false;
     }
   }
 
-  if (self->menu != nullptr && !DestroyMenu(self->menu)) {
-    DestroyMenu(menu);
-    self->native_error = "could not replace notification area menu";
-    return false;
+  if (self->menu != nullptr) {
+    if (!DestroyMenu(self->menu)) {
+      DestroyMenu(menu);
+      bare_win_ui_notification__test_live_resources--;
+      self->native_error = "could not replace notification area menu";
+      return false;
+    }
+    bare_win_ui_notification__test_live_resources--;
   }
 
   self->menu = menu;
@@ -280,6 +296,7 @@ bare_win_ui_notification__destroy(bare_win_ui_notification_area_t *self) {
     if (!DestroyMenu(self->menu) && self->native_error == nullptr) {
       self->native_error = "could not destroy notification area menu";
     }
+    bare_win_ui_notification__test_live_resources--;
     self->menu = nullptr;
   }
 
@@ -287,13 +304,15 @@ bare_win_ui_notification__destroy(bare_win_ui_notification_area_t *self) {
     if (!DestroyWindow(self->window) && self->native_error == nullptr) {
       self->native_error = "could not destroy notification area window";
     }
+    bare_win_ui_notification__test_live_resources--;
     self->window = nullptr;
   }
 
-  if (self->icon_owned && self->icon != nullptr) {
-    if (!DestroyIcon(self->icon) && self->native_error == nullptr) {
+  if (self->icon != nullptr) {
+    if (self->icon_owned && !DestroyIcon(self->icon) && self->native_error == nullptr) {
       self->native_error = "could not destroy notification area icon";
     }
+    bare_win_ui_notification__test_live_resources--;
   }
   self->icon = nullptr;
   self->icon_owned = false;
@@ -434,8 +453,9 @@ bare_win_ui_notification_area_init(js_env_t *env, js_callback_info_t *info) {
     delete self;
     return nullptr;
   }
-
+  bare_win_ui_notification__test_live_resources++;
   self->icon = bare_win_ui_notification__load_icon(self->icon_owned);
+  if (self->icon != nullptr) bare_win_ui_notification__test_live_resources++;
   if (self->icon == nullptr || !bare_win_ui_notification__set_icon(self)) {
     js_throw_error(env, "ERR_NATIVE_SETUP", "could not add notification area icon");
     bare_win_ui_notification__destroy(self);
@@ -447,6 +467,15 @@ bare_win_ui_notification_area_init(js_env_t *env, js_callback_info_t *info) {
 
   if (!bare_win_ui_notification__rebuild_menu(self)) {
     js_throw_error(env, "ERR_NATIVE_SETUP", self->native_error);
+    bare_win_ui_notification__destroy(self);
+    js_delete_reference(env, self->on_select);
+    js_delete_reference(env, self->ctx);
+    delete self;
+    return nullptr;
+  }
+
+  if (bare_win_ui_notification__test_should_fail_init()) {
+    js_throw_error(env, "ERR_NATIVE_SETUP", "test notification area failure after menu");
     bare_win_ui_notification__destroy(self);
     js_delete_reference(env, self->on_select);
     js_delete_reference(env, self->ctx);
@@ -624,6 +653,34 @@ bare_win_ui_notification_area_clear(js_env_t *env, js_callback_info_t *info) {
     js_throw_error(env, "ERR_NATIVE_OPERATION", self->native_error);
   }
   return nullptr;
+}
+
+static js_value_t *
+bare_win_ui_notification_area_test_fail_init(js_env_t *env, js_callback_info_t *info) {
+  int err;
+
+  size_t argc = 0;
+  err = js_get_callback_info(env, info, &argc, nullptr, nullptr, nullptr);
+  assert(err == 0);
+  assert(argc == 0);
+
+  bare_win_ui_notification__test_fail_init.store(true);
+  return nullptr;
+}
+
+static js_value_t *
+bare_win_ui_notification_area_test_live_resources(js_env_t *env, js_callback_info_t *info) {
+  int err;
+
+  size_t argc = 0;
+  err = js_get_callback_info(env, info, &argc, nullptr, nullptr, nullptr);
+  assert(err == 0);
+  assert(argc == 0);
+
+  js_value_t *result;
+  err = js_create_int32(env, bare_win_ui_notification__test_live_resources.load(), &result);
+  assert(err == 0);
+  return result;
 }
 
 static js_value_t *

@@ -6,11 +6,34 @@ const { Window, WebView, NotificationArea } = require('./')
 let window = null
 let webView = null
 let notificationArea = null
+let pendingWebView = null
 let closeEvents = 0
 let shutdownStarted = false
 
 function check(condition, message) {
   if (!condition) throw new Error(message)
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds))
+}
+
+async function waitFor(condition, message) {
+  const deadline = Date.now() + 10000
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(message)
+    await delay(10)
+  }
+}
+
+async function expectRejected(promise, message) {
+  try {
+    await promise
+  } catch (error) {
+    check(error && error.message === message, `Expected '${message}'`)
+    return
+  }
+  throw new Error(`Expected rejection '${message}'`)
 }
 
 function messageWithTimeout(expected) {
@@ -35,6 +58,10 @@ function shutdown(code) {
   shutdownStarted = true
 
   try {
+    if (pendingWebView !== null) {
+      pendingWebView.destroy().destroy()
+      binding.webViewTestReleaseReady(pendingWebView._handle)
+    }
     if (webView !== null) webView.destroy().destroy()
     if (notificationArea !== null) notificationArea.destroy().destroy()
     if (window !== null) window.close().close()
@@ -44,11 +71,56 @@ function shutdown(code) {
 
   setTimeout(() => {
     if (closeEvents !== 1) code = 1
+    if (binding.notificationAreaTestLiveResources() !== 0) code = 1
     Bare.exit(code)
   }, 0)
 }
 
+function verifyPartialConstructionFailure() {
+  const baseline = binding.notificationAreaTestLiveResources()
+  binding.notificationAreaTestFailInit()
+
+  let failed = false
+  try {
+    new NotificationArea({ tooltip: 'failed construction' })
+  } catch {
+    failed = true
+  }
+
+  check(failed, 'native partial construction did not fail')
+  check(
+    binding.notificationAreaTestLiveResources() === baseline,
+    'native resources leaked after partial construction'
+  )
+}
+
+async function verifyPendingWebViewTeardown() {
+  binding.webViewTestHoldReady()
+  pendingWebView = new WebView()
+
+  let messages = 0
+  pendingWebView.on('message', () => messages++)
+  const pendingOperation = pendingWebView.navigateToString('<p>never ready</p>')
+
+  await waitFor(
+    () => binding.webViewTestReadyPending(pendingWebView._handle),
+    'WebView readiness did not become pending'
+  )
+
+  pendingWebView.destroy().destroy()
+  await expectRejected(pendingOperation, 'WebView was destroyed')
+  binding.webViewTestMessage(pendingWebView._handle, 'late callback')
+  binding.webViewTestReleaseReady(pendingWebView._handle)
+  await delay(0)
+
+  check(messages === 0, 'WebView delivered a callback after teardown')
+  pendingWebView = null
+}
+
 async function main() {
+  await verifyPendingWebViewTeardown()
+  await verifyPartialConstructionFailure()
+
   window = new Window()
   webView = new WebView()
   notificationArea = new NotificationArea({ tooltip: 'bare-win-ui sample' })

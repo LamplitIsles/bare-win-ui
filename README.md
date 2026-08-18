@@ -68,9 +68,12 @@ bare-build --base . --host win32-x64 --runtime ./runtime.js --out sample-build s
 
 The sample exits nonzero on a failed readiness/message exchange, native close
 request cancellation and reuse of the same window, native menu selection,
-taskbar recreation seam, or teardown. Its private binding seams exercise
-native user-close and `TaskbarCreated` dispatch without adding application
-policy to the public API.
+taskbar recreation seam, partial notification-area construction failure, or
+teardown. It holds WebView readiness, destroys the view, then releases the
+pending native callback and injects a late message to verify no callback leaks
+through. Its private binding seams exercise native user-close,
+`TaskbarCreated`, failure cleanup, and callback suppression without adding
+application policy to the public API.
 
 The runtime's no-window exit path can be checked independently:
 

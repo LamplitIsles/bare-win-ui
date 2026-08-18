@@ -4,7 +4,9 @@
 #include <shellapi.h>
 #include <utf.h>
 
+#include <atomic>
 #include <memory>
+#include <mutex>
 
 #include "windows-app-sdk.h"
 
@@ -21,7 +23,14 @@ struct bare_win_ui_web_view_t {
   bool destroyed = false;
   bool references_deleted = false;
   bool finalized = false;
+
+  std::weak_ptr<bare_win_ui_web_view_t> owner;
+  std::mutex ready_lock;
+  AsyncStatus pending_ready_status;
+  bool ready_pending = false;
 };
+
+static std::atomic<bool> bare_win_ui_web_view__test_hold_ready = false;
 
 static void
 bare_win_ui_web_view__destroy(bare_win_ui_web_view_t *self) {
@@ -109,12 +118,11 @@ bare_win_ui_web_view__on_message(bare_win_ui_web_view_t *self, hstring const &me
 
 static void
 bare_win_ui_web_view__on_ready(
-  std::shared_ptr<bare_win_ui_web_view_t> const &owner,
+  bare_win_ui_web_view_t *self,
   AsyncStatus const &status
 ) {
   int err;
 
-  auto self = owner.get();
   if (self->finalized || self->destroyed) return;
 
   auto env = self->env;
@@ -136,9 +144,12 @@ bare_win_ui_web_view__on_ready(
   if (status == AsyncStatus::Completed) {
     auto core = self->handle.CoreWebView2();
 
+    auto owner = self->owner;
     self->message_token = core.WebMessageReceived([owner](auto &, auto &args) {
       auto message = args.TryGetWebMessageAsString();
-      bare_win_ui_web_view__on_message(owner.get(), message);
+      if (auto self = owner.lock()) {
+        bare_win_ui_web_view__on_message(self.get(), message);
+      }
     });
     self->message_handler = true;
 
@@ -188,6 +199,7 @@ bare_win_ui_web_view_init(js_env_t *env, js_callback_info_t *info) {
   err = js_create_reference(env, argv[2], 1, &web_view->on_message);
   assert(err == 0);
 
+  web_view->owner = web_view;
   auto owner = new std::shared_ptr<bare_win_ui_web_view_t>(web_view);
 
   js_value_t *result;
@@ -201,12 +213,118 @@ bare_win_ui_web_view_init(js_env_t *env, js_callback_info_t *info) {
   req.Completed([web_view, dispatcher](auto &, auto &status) {
     auto completion = status;
 
+    {
+      std::lock_guard guard(web_view->ready_lock);
+      if (bare_win_ui_web_view__test_hold_ready.exchange(false)) {
+        web_view->pending_ready_status = completion;
+        web_view->ready_pending = true;
+        return;
+      }
+    }
+
     dispatcher.TryEnqueue([web_view, completion] {
-      bare_win_ui_web_view__on_ready(web_view, completion);
+      bare_win_ui_web_view__on_ready(web_view.get(), completion);
     });
   });
 
   return result;
+}
+
+static js_value_t *
+bare_win_ui_web_view_test_hold_ready(js_env_t *env, js_callback_info_t *info) {
+  int err;
+
+  size_t argc = 0;
+  err = js_get_callback_info(env, info, &argc, nullptr, nullptr, nullptr);
+  assert(err == 0);
+  assert(argc == 0);
+
+  bare_win_ui_web_view__test_hold_ready.store(true);
+  return nullptr;
+}
+
+static js_value_t *
+bare_win_ui_web_view_test_ready_pending(js_env_t *env, js_callback_info_t *info) {
+  int err;
+
+  size_t argc = 1;
+  js_value_t *argv[1];
+  err = js_get_callback_info(env, info, &argc, argv, nullptr, nullptr);
+  assert(err == 0);
+  assert(argc == 1);
+
+  bare_win_ui_web_view_t *web_view;
+  err = js_get_value_external(env, argv[0], (void **) &web_view);
+  assert(err == 0);
+
+  bool pending;
+  {
+    std::lock_guard guard(web_view->ready_lock);
+    pending = web_view->ready_pending;
+  }
+
+  js_value_t *result;
+  err = js_get_boolean(env, pending, &result);
+  assert(err == 0);
+  return result;
+}
+
+static js_value_t *
+bare_win_ui_web_view_test_message(js_env_t *env, js_callback_info_t *info) {
+  int err;
+
+  size_t argc = 2;
+  js_value_t *argv[2];
+  err = js_get_callback_info(env, info, &argc, argv, nullptr, nullptr);
+  assert(err == 0);
+  assert(argc == 2);
+
+  bare_win_ui_web_view_t *web_view;
+  err = js_get_value_external(env, argv[0], (void **) &web_view);
+  assert(err == 0);
+
+  size_t len;
+  err = js_get_value_string_utf16le(env, argv[1], nullptr, 0, &len);
+  assert(err == 0);
+
+  std::vector<wchar_t> message(len);
+  err = js_get_value_string_utf16le(
+    env,
+    argv[1],
+    reinterpret_cast<utf16_t *>(message.data()),
+    len,
+    nullptr
+  );
+  assert(err == 0);
+
+  bare_win_ui_web_view__on_message(web_view, hstring(message.data(), len));
+  return nullptr;
+}
+
+static js_value_t *
+bare_win_ui_web_view_test_release_ready(js_env_t *env, js_callback_info_t *info) {
+  int err;
+
+  size_t argc = 1;
+  js_value_t *argv[1];
+  err = js_get_callback_info(env, info, &argc, argv, nullptr, nullptr);
+  assert(err == 0);
+  assert(argc == 1);
+
+  bare_win_ui_web_view_t *web_view;
+  err = js_get_value_external(env, argv[0], (void **) &web_view);
+  assert(err == 0);
+
+  AsyncStatus status;
+  {
+    std::lock_guard guard(web_view->ready_lock);
+    if (!web_view->ready_pending) return nullptr;
+    status = web_view->pending_ready_status;
+    web_view->ready_pending = false;
+  }
+
+  bare_win_ui_web_view__on_ready(web_view, status);
+  return nullptr;
 }
 
 static js_value_t *
