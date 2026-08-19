@@ -30,14 +30,18 @@ struct bare_win_ui_web_view_t {
   std::mutex ready_lock;
   AsyncStatus pending_ready_status;
   bool ready_pending = false;
+#ifdef BARE_WIN_UI_TESTING
   std::mutex script_lock;
   AsyncStatus pending_script_status;
   bool script_pending = false;
+#endif
 };
 
 static std::atomic<bool> bare_win_ui_web_view__test_hold_ready = false;
+#ifdef BARE_WIN_UI_TESTING
 static std::atomic<bool> bare_win_ui_web_view__test_hold_script = false;
 static std::atomic<bool> bare_win_ui_web_view__test_fail_script = false;
+#endif
 
 static constexpr wchar_t bare_win_ui_web_view__bridge_script[] = LR"BARE(
 (function () {
@@ -216,6 +220,7 @@ bare_win_ui_web_view__on_script_ready(
   auto self = web_view.get();
   if (self->finalized || self->destroyed) return;
 
+#ifdef BARE_WIN_UI_TESTING
   if (bare_win_ui_web_view__test_fail_script.exchange(false)) {
     status = AsyncStatus::Error;
   }
@@ -228,6 +233,7 @@ bare_win_ui_web_view__on_script_ready(
       return;
     }
   }
+#endif
 
   dispatcher.TryEnqueue([web_view, status] {
     bare_win_ui_web_view__on_ready(
@@ -431,6 +437,7 @@ bare_win_ui_web_view_test_release_ready(js_env_t *env, js_callback_info_t *info)
   return nullptr;
 }
 
+#ifdef BARE_WIN_UI_TESTING
 static js_value_t *
 bare_win_ui_web_view_test_hold_script(js_env_t *env, js_callback_info_t *info) {
   int err;
@@ -540,6 +547,8 @@ bare_win_ui_web_view_test_non_string_message(js_env_t *env, js_callback_info_t *
 
   return nullptr;
 }
+
+#endif
 
 static js_value_t *
 bare_win_ui_web_view_width(js_env_t *env, js_callback_info_t *info) {

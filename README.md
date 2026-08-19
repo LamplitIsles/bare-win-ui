@@ -66,10 +66,12 @@ The module contains no application-specific labels or lifecycle policy.
 ## Integrated native check
 
 From this package directory on the Windows build host, build the local x64
-prebuild and run the real primitives together:
+adapter test prebuild and run the real primitives together. The explicit
+`BARE_WIN_UI_TESTING` definition enables native seams used only by this check;
+production builds leave it disabled and do not export those controls:
 
 ```console
-bare-make generate --source . --build build --platform win32 --arch x64
+bare-make generate --source . --build build --platform win32 --arch x64 --define BARE_WIN_UI_TESTING:BOOL=ON
 bare-make build --build build
 bare-make install --build build --prefix prebuilds
 bare-build --base . --host win32-x64 --runtime ./runtime.js --out sample-build sample.js
@@ -79,9 +81,10 @@ bare-build --base . --host win32-x64 --runtime ./runtime.js --out sample-build s
 The sample exits nonzero on a failed readiness/message exchange, native close
 request cancellation and reuse of the same window, native menu selection,
 taskbar recreation seam, partial notification-area construction failure, or
-teardown. It holds WebView readiness, destroys the view, then releases the
-pending native callback and injects a late message to verify no callback leaks
-through. Its private binding seams exercise native user-close,
+teardown. It separately holds document-script registration and WebView
+readiness, destroys each view, then releases the pending native callback and
+injects a late message to verify no callback leaks through. Its private binding
+seams exercise native user-close,
 `TaskbarCreated`, failure cleanup, and callback suppression without adding
 application policy to the public API.
 

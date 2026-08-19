@@ -156,6 +156,32 @@ async function verifyBridgeRegistrationFailure() {
   pendingWebView = null
 }
 
+async function verifyPendingBridgeTeardown() {
+  binding.webViewTestHoldScript()
+  pendingWebView = new WebView()
+
+  let navigationSettled = false
+  let messages = 0
+  pendingWebView.on('message', () => messages++)
+  const pendingOperation = pendingWebView.navigateToString('<p>never ready</p>').then(() => {
+    navigationSettled = true
+  })
+
+  await waitFor(
+    () => binding.webViewTestScriptPending(pendingWebView._handle),
+    'WebView bridge registration did not become pending for teardown'
+  )
+
+  pendingWebView.destroy().destroy()
+  await expectRejected(pendingOperation, 'WebView was destroyed')
+  binding.webViewTestReleaseScript(pendingWebView._handle)
+  await delay(0)
+
+  check(!navigationSettled, 'navigation ran after bridge teardown')
+  check(messages === 0, 'WebView delivered a callback after bridge teardown')
+  pendingWebView = null
+}
+
 async function verifyPendingWebViewTeardown() {
   binding.webViewTestHoldReady()
   pendingWebView = new WebView()
@@ -194,6 +220,7 @@ async function verifyNonStringMessage() {
 async function main() {
   await verifyPendingBridge()
   await verifyBridgeRegistrationFailure()
+  await verifyPendingBridgeTeardown()
   await verifyPendingWebViewTeardown()
 
   window = new Window()
