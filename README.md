@@ -67,8 +67,9 @@ The module contains no application-specific labels or lifecycle policy.
 
 From this package directory on the Windows build host, build the local x64
 adapter test prebuild and run the real primitives together. The explicit
-`BARE_WIN_UI_TESTING` definition enables native seams used only by this check;
-production builds leave it disabled and do not export those controls:
+`BARE_WIN_UI_TESTING` definition enables the document-script bridge seams used
+by this check; production builds leave it disabled and do not export those
+bridge-specific controls:
 
 ```console
 bare-make generate --source . --build build --platform win32 --arch x64 --define BARE_WIN_UI_TESTING:BOOL=ON

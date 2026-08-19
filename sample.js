@@ -148,8 +148,12 @@ async function verifyBridgeRegistrationFailure() {
   let messages = 0
   pendingWebView.on('message', () => messages++)
   const pendingOperation = pendingWebView.navigateToString('<p>bridge failed</p>')
+  const pendingMessage = pendingWebView.postMessage('bridge failed')
 
-  await expectRejected(pendingOperation, 'WebView bridge initialization failed')
+  await Promise.all([
+    expectRejected(pendingOperation, 'WebView bridge initialization failed'),
+    expectRejected(pendingMessage, 'WebView bridge initialization failed')
+  ])
   check(messages === 0, 'WebView delivered a message after bridge failure')
 
   pendingWebView.destroy().destroy()

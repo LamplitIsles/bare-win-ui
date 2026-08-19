@@ -512,11 +512,10 @@ bare_win_ui_web_view_test_release_script(js_env_t *env, js_callback_info_t *info
     web_view->script_pending = false;
   }
 
-  bare_win_ui_web_view__on_ready(
-    web_view,
-    status,
-    L"WebView bridge initialization failed"
-  );
+  auto owner = web_view->owner.lock();
+  if (owner != nullptr) {
+    bare_win_ui_web_view__on_script_ready(owner, status, web_view->dispatcher);
+  }
   return nullptr;
 }
 
