@@ -5,6 +5,8 @@ find_package(cmake-fetch REQUIRED PATHS node_modules/cmake-fetch)
 
 project(bare_win_ui C CXX)
 
+option(BARE_WIN_UI_TESTING "Build adapter-only native test controls" OFF)
+
 fetch_package("github:holepunchto/bare@1.29.4")
 fetch_package("github:holepunchto/libpath")
 
@@ -17,6 +19,10 @@ target_sources(
   PRIVATE
     binding.cc
 )
+
+if(BARE_WIN_UI_TESTING)
+  target_compile_definitions(${bare_win_ui} PRIVATE BARE_WIN_UI_TESTING)
+endif()
 
 target_compile_options(
   ${bare_win_ui}
@@ -34,6 +40,7 @@ target_link_libraries(
   ${bare_win_ui}
   PUBLIC
     WindowsAppSDK
+    shell32
 )
 
 add_executable(bare_runtime)

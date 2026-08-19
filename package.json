@@ -5,11 +5,13 @@
   "exports": {
     "./package": "./package.json",
     ".": "./index.js",
-    "./runtime": "./runtime.js"
+    "./runtime": "./runtime.js",
+    "./testing": "./testing.js"
   },
   "files": [
     "index.js",
     "runtime.js",
+    "testing.js",
     "binding.cc",
     "binding.js",
     "CMakeLists.txt",
