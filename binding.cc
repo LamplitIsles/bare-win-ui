@@ -46,6 +46,8 @@ bare_win_ui_exports(js_env_t *env, js_value_t *exports) {
   V("webViewTestReleaseScript", bare_win_ui_web_view_test_release_script)
   V("webViewTestNavigationStarted", bare_win_ui_web_view_test_navigation_started)
   V("webViewTestNonStringMessage", bare_win_ui_web_view_test_non_string_message)
+  V("webViewTestResetPostMessageCount", bare_win_ui_web_view_test_reset_post_message_count)
+  V("webViewTestPostMessageCount", bare_win_ui_web_view_test_post_message_count)
 #endif
   V("webViewWidth", bare_win_ui_web_view_width)
   V("webViewHeight", bare_win_ui_web_view_height)

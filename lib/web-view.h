@@ -5,6 +5,7 @@
 #include <utf.h>
 
 #include <atomic>
+#include <cstdint>
 #include <cwchar>
 #include <memory>
 #include <mutex>
@@ -42,6 +43,7 @@ static std::atomic<bool> bare_win_ui_web_view__test_hold_ready = false;
 #ifdef BARE_WIN_UI_TESTING
 static std::atomic<bool> bare_win_ui_web_view__test_hold_script = false;
 static std::atomic<bool> bare_win_ui_web_view__test_fail_script = false;
+static std::atomic<uint32_t> bare_win_ui_web_view__test_post_message_count = 0;
 #endif
 
 static constexpr wchar_t bare_win_ui_web_view__bridge_script[] = LR"BARE(
@@ -320,7 +322,7 @@ bare_win_ui_web_view_init(js_env_t *env, js_callback_info_t *info) {
   DispatcherQueue dispatcher = DispatcherQueue::GetForCurrentThread();
   web_view->dispatcher = dispatcher;
 
-  req.Completed([web_view](auto &, auto &status) {
+  req.Completed([web_view, dispatcher](auto &, auto &status) {
     auto completion = status;
 
     {
@@ -332,7 +334,9 @@ bare_win_ui_web_view_init(js_env_t *env, js_callback_info_t *info) {
       }
     }
 
-    bare_win_ui_web_view__on_core_ready(web_view, completion);
+    dispatcher.TryEnqueue([web_view, completion] {
+      bare_win_ui_web_view__on_core_ready(web_view, completion);
+    });
   });
 
   return result;
@@ -433,7 +437,10 @@ bare_win_ui_web_view_test_release_ready(js_env_t *env, js_callback_info_t *info)
 
   auto owner = web_view->owner.lock();
   if (owner != nullptr) {
-    bare_win_ui_web_view__on_core_ready(owner, status);
+    auto dispatcher = owner->dispatcher;
+    dispatcher.TryEnqueue([owner, status] {
+      bare_win_ui_web_view__on_core_ready(owner, status);
+    });
   }
   return nullptr;
 }
@@ -567,6 +574,38 @@ bare_win_ui_web_view_test_non_string_message(js_env_t *env, js_callback_info_t *
 )HTML"));
 
   return nullptr;
+}
+
+static js_value_t *
+bare_win_ui_web_view_test_reset_post_message_count(js_env_t *env, js_callback_info_t *info) {
+  int err;
+
+  size_t argc = 0;
+  err = js_get_callback_info(env, info, &argc, nullptr, nullptr, nullptr);
+  assert(err == 0);
+  assert(argc == 0);
+
+  bare_win_ui_web_view__test_post_message_count.store(0);
+  return nullptr;
+}
+
+static js_value_t *
+bare_win_ui_web_view_test_post_message_count(js_env_t *env, js_callback_info_t *info) {
+  int err;
+
+  size_t argc = 0;
+  err = js_get_callback_info(env, info, &argc, nullptr, nullptr, nullptr);
+  assert(err == 0);
+  assert(argc == 0);
+
+  js_value_t *result;
+  err = js_create_uint32(
+    env,
+    bare_win_ui_web_view__test_post_message_count.load(),
+    &result
+  );
+  assert(err == 0);
+  return result;
 }
 
 #endif
@@ -770,6 +809,10 @@ bare_win_ui_web_view_post_message(js_env_t *env, js_callback_info_t *info) {
   auto core = web_view->handle.CoreWebView2();
   assert(core);
   assert(!web_view->destroyed);
+
+#ifdef BARE_WIN_UI_TESTING
+  bare_win_ui_web_view__test_post_message_count.fetch_add(1);
+#endif
 
   core.PostWebMessageAsString(hstring(message.data(), len));
 

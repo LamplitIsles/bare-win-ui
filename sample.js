@@ -147,6 +147,7 @@ async function verifyBridgeRegistrationFailure() {
 
   let messages = 0
   pendingWebView.on('message', () => messages++)
+  binding.webViewTestResetPostMessageCount()
   const pendingOperation = pendingWebView.navigateToString('<p>bridge failed</p>')
   const pendingMessage = pendingWebView.postMessage('bridge failed')
 
@@ -157,6 +158,10 @@ async function verifyBridgeRegistrationFailure() {
   check(
     !binding.webViewTestNavigationStarted(pendingWebView._handle),
     'WebView navigated after bridge failure'
+  )
+  check(
+    binding.webViewTestPostMessageCount() === 0,
+    'WebView posted a message after bridge failure'
   )
   check(messages === 0, 'WebView delivered a message after bridge failure')
 
