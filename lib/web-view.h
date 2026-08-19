@@ -220,28 +220,30 @@ bare_win_ui_web_view__on_script_ready(
   AsyncStatus status,
   DispatcherQueue const &dispatcher
 ) {
-  auto self = web_view.get();
-  if (self->finalized || self->destroyed) return;
+  dispatcher.TryEnqueue([web_view, status] {
+    auto self = web_view.get();
+    if (self->finalized || self->destroyed) return;
+
+    auto completion = status;
 
 #ifdef BARE_WIN_UI_TESTING
-  if (bare_win_ui_web_view__test_fail_script.exchange(false)) {
-    status = AsyncStatus::Error;
-  }
-
-  {
-    std::lock_guard guard(self->script_lock);
-    if (bare_win_ui_web_view__test_hold_script.exchange(false)) {
-      self->pending_script_status = status;
-      self->script_pending = true;
-      return;
+    if (bare_win_ui_web_view__test_fail_script.exchange(false)) {
+      completion = AsyncStatus::Error;
     }
-  }
+
+    {
+      std::lock_guard guard(self->script_lock);
+      if (bare_win_ui_web_view__test_hold_script.exchange(false)) {
+        self->pending_script_status = completion;
+        self->script_pending = true;
+        return;
+      }
+    }
 #endif
 
-  dispatcher.TryEnqueue([web_view, status] {
     bare_win_ui_web_view__on_ready(
-      web_view.get(),
-      status,
+      self,
+      completion,
       L"WebView bridge initialization failed"
     );
   });
