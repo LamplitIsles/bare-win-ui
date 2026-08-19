@@ -15,9 +15,19 @@ close emits `close` once. Size changes emit `resize` with `{ width, height }`.
 
 `WebView` becomes ready asynchronously. `navigate()`, `navigateToString()`,
 `postMessage()`, and `openDevToolsWindow()` run after readiness in invocation
-order. Page messages are emitted as `message` events. `openExternal()` accepts
-only `http:` and `https:` URLs and uses the system handler. `destroy()` is
-idempotent, releases the native control, and prevents later callbacks.
+order. Page messages are emitted as `message` events. The injected page bridge
+matches the portable Bare WebView contract:
+
+```js
+window.bareNative.postMessage('from-page')
+window.addEventListener('bare-native-message', (event) => {
+  console.log(event.data)
+})
+```
+
+Only strings cross this bridge. `openExternal()` accepts only `http:` and
+`https:` URLs and uses the system handler. `destroy()` is idempotent, releases
+the native control, and prevents later callbacks.
 
 `NotificationArea` uses the packaged executable's icon when one is available;
 otherwise it uses Windows' shared default application icon. It exposes mutable

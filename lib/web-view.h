@@ -5,6 +5,7 @@
 #include <utf.h>
 
 #include <atomic>
+#include <cwchar>
 #include <memory>
 #include <mutex>
 
@@ -25,12 +26,40 @@ struct bare_win_ui_web_view_t {
   bool finalized = false;
 
   std::weak_ptr<bare_win_ui_web_view_t> owner;
+  DispatcherQueue dispatcher = nullptr;
   std::mutex ready_lock;
   AsyncStatus pending_ready_status;
   bool ready_pending = false;
+  std::mutex script_lock;
+  AsyncStatus pending_script_status;
+  bool script_pending = false;
 };
 
 static std::atomic<bool> bare_win_ui_web_view__test_hold_ready = false;
+static std::atomic<bool> bare_win_ui_web_view__test_hold_script = false;
+static std::atomic<bool> bare_win_ui_web_view__test_fail_script = false;
+
+static constexpr wchar_t bare_win_ui_web_view__bridge_script[] = LR"BARE(
+(function () {
+  const bridge = Object.freeze({
+    postMessage(message) {
+      if (typeof message === 'string') {
+        window.chrome.webview.postMessage(message)
+      }
+    }
+  })
+
+  Object.defineProperty(window, 'bareNative', {
+    configurable: false,
+    value: bridge
+  })
+
+  window.chrome.webview.addEventListener('message', (event) => {
+    if (typeof event.data !== 'string') return
+    window.dispatchEvent(new MessageEvent('bare-native-message', { data: event.data }))
+  })
+})()
+)BARE";
 
 static void
 bare_win_ui_web_view__destroy(bare_win_ui_web_view_t *self) {
@@ -119,7 +148,8 @@ bare_win_ui_web_view__on_message(bare_win_ui_web_view_t *self, hstring const &me
 static void
 bare_win_ui_web_view__on_ready(
   bare_win_ui_web_view_t *self,
-  AsyncStatus const &status
+  AsyncStatus const &status,
+  wchar_t const *error_message = L"WebView2 initialization failed"
 ) {
   int err;
 
@@ -146,9 +176,14 @@ bare_win_ui_web_view__on_ready(
 
     auto owner = self->owner;
     self->message_token = core.WebMessageReceived([owner](auto &, auto &args) {
-      auto message = args.TryGetWebMessageAsString();
-      if (auto self = owner.lock()) {
-        bare_win_ui_web_view__on_message(self.get(), message);
+      try {
+        auto message = args.TryGetWebMessageAsString();
+        if (auto self = owner.lock()) {
+          bare_win_ui_web_view__on_message(self.get(), message);
+        }
+      } catch (hresult_error const &) {
+        // WebView2 throws when a page sends a non-string message. The
+        // portable Bare WebView contract only forwards strings.
       }
     });
     self->message_handler = true;
@@ -156,12 +191,10 @@ bare_win_ui_web_view__on_ready(
     err = js_get_null(env, &args[0]);
     assert(err == 0);
   } else {
-    wchar_t const error[] = L"WebView2 initialization failed";
-
     err = js_create_string_utf16le(
       env,
-      reinterpret_cast<const utf16_t *>(error),
-      sizeof(error) / sizeof(error[0]) - 1,
+      reinterpret_cast<const utf16_t *>(error_message),
+      wcslen(error_message),
       &args[0]
     );
     assert(err == 0);
@@ -172,6 +205,75 @@ bare_win_ui_web_view__on_ready(
 
   err = js_close_handle_scope(env, scope);
   assert(err == 0);
+}
+
+static void
+bare_win_ui_web_view__on_script_ready(
+  std::shared_ptr<bare_win_ui_web_view_t> const &web_view,
+  AsyncStatus status,
+  DispatcherQueue const &dispatcher
+) {
+  auto self = web_view.get();
+  if (self->finalized || self->destroyed) return;
+
+  if (bare_win_ui_web_view__test_fail_script.exchange(false)) {
+    status = AsyncStatus::Error;
+  }
+
+  {
+    std::lock_guard guard(self->script_lock);
+    if (bare_win_ui_web_view__test_hold_script.exchange(false)) {
+      self->pending_script_status = status;
+      self->script_pending = true;
+      return;
+    }
+  }
+
+  dispatcher.TryEnqueue([web_view, status] {
+    bare_win_ui_web_view__on_ready(
+      web_view.get(),
+      status,
+      L"WebView bridge initialization failed"
+    );
+  });
+}
+
+static void
+bare_win_ui_web_view__on_core_ready(
+  std::shared_ptr<bare_win_ui_web_view_t> const &web_view,
+  AsyncStatus status
+) {
+  auto self = web_view.get();
+  if (self->finalized || self->destroyed) return;
+
+  auto dispatcher = self->dispatcher;
+
+  if (status != AsyncStatus::Completed) {
+    dispatcher.TryEnqueue([web_view, status] {
+      bare_win_ui_web_view__on_ready(web_view.get(), status);
+    });
+    return;
+  }
+
+  auto core = self->handle.CoreWebView2();
+  assert(core);
+
+  try {
+    auto registration = core.AddScriptToExecuteOnDocumentCreatedAsync(
+      hstring(bare_win_ui_web_view__bridge_script)
+    );
+    registration.Completed([web_view, dispatcher](auto &, auto &status) {
+      bare_win_ui_web_view__on_script_ready(web_view, status, dispatcher);
+    });
+  } catch (hresult_error const &) {
+    dispatcher.TryEnqueue([web_view] {
+      bare_win_ui_web_view__on_ready(
+        web_view.get(),
+        AsyncStatus::Error,
+        L"WebView bridge initialization failed"
+      );
+    });
+  }
 }
 
 static js_value_t *
@@ -209,8 +311,9 @@ bare_win_ui_web_view_init(js_env_t *env, js_callback_info_t *info) {
   auto req = web_view->handle.EnsureCoreWebView2Async();
 
   DispatcherQueue dispatcher = DispatcherQueue::GetForCurrentThread();
+  web_view->dispatcher = dispatcher;
 
-  req.Completed([web_view, dispatcher](auto &, auto &status) {
+  req.Completed([web_view](auto &, auto &status) {
     auto completion = status;
 
     {
@@ -222,9 +325,7 @@ bare_win_ui_web_view_init(js_env_t *env, js_callback_info_t *info) {
       }
     }
 
-    dispatcher.TryEnqueue([web_view, completion] {
-      bare_win_ui_web_view__on_ready(web_view.get(), completion);
-    });
+    bare_win_ui_web_view__on_core_ready(web_view, completion);
   });
 
   return result;
@@ -323,7 +424,120 @@ bare_win_ui_web_view_test_release_ready(js_env_t *env, js_callback_info_t *info)
     web_view->ready_pending = false;
   }
 
-  bare_win_ui_web_view__on_ready(web_view, status);
+  auto owner = web_view->owner.lock();
+  if (owner != nullptr) {
+    bare_win_ui_web_view__on_core_ready(owner, status);
+  }
+  return nullptr;
+}
+
+static js_value_t *
+bare_win_ui_web_view_test_hold_script(js_env_t *env, js_callback_info_t *info) {
+  int err;
+
+  size_t argc = 0;
+  err = js_get_callback_info(env, info, &argc, nullptr, nullptr, nullptr);
+  assert(err == 0);
+  assert(argc == 0);
+
+  bare_win_ui_web_view__test_hold_script.store(true);
+  return nullptr;
+}
+
+static js_value_t *
+bare_win_ui_web_view_test_fail_script(js_env_t *env, js_callback_info_t *info) {
+  int err;
+
+  size_t argc = 0;
+  err = js_get_callback_info(env, info, &argc, nullptr, nullptr, nullptr);
+  assert(err == 0);
+  assert(argc == 0);
+
+  bare_win_ui_web_view__test_fail_script.store(true);
+  return nullptr;
+}
+
+static js_value_t *
+bare_win_ui_web_view_test_script_pending(js_env_t *env, js_callback_info_t *info) {
+  int err;
+
+  size_t argc = 1;
+  js_value_t *argv[1];
+  err = js_get_callback_info(env, info, &argc, argv, nullptr, nullptr);
+  assert(err == 0);
+  assert(argc == 1);
+
+  bare_win_ui_web_view_t *web_view;
+  err = js_get_value_external(env, argv[0], (void **) &web_view);
+  assert(err == 0);
+
+  bool pending;
+  {
+    std::lock_guard guard(web_view->script_lock);
+    pending = web_view->script_pending;
+  }
+
+  js_value_t *result;
+  err = js_get_boolean(env, pending, &result);
+  assert(err == 0);
+  return result;
+}
+
+static js_value_t *
+bare_win_ui_web_view_test_release_script(js_env_t *env, js_callback_info_t *info) {
+  int err;
+
+  size_t argc = 1;
+  js_value_t *argv[1];
+  err = js_get_callback_info(env, info, &argc, argv, nullptr, nullptr);
+  assert(err == 0);
+  assert(argc == 1);
+
+  bare_win_ui_web_view_t *web_view;
+  err = js_get_value_external(env, argv[0], (void **) &web_view);
+  assert(err == 0);
+
+  AsyncStatus status;
+  {
+    std::lock_guard guard(web_view->script_lock);
+    if (!web_view->script_pending) return nullptr;
+    status = web_view->pending_script_status;
+    web_view->script_pending = false;
+  }
+
+  bare_win_ui_web_view__on_ready(
+    web_view,
+    status,
+    L"WebView bridge initialization failed"
+  );
+  return nullptr;
+}
+
+static js_value_t *
+bare_win_ui_web_view_test_non_string_message(js_env_t *env, js_callback_info_t *info) {
+  int err;
+
+  size_t argc = 1;
+  js_value_t *argv[1];
+  err = js_get_callback_info(env, info, &argc, argv, nullptr, nullptr);
+  assert(err == 0);
+  assert(argc == 1);
+
+  bare_win_ui_web_view_t *web_view;
+  err = js_get_value_external(env, argv[0], (void **) &web_view);
+  assert(err == 0);
+
+  auto core = web_view->handle.CoreWebView2();
+  assert(core);
+  assert(!web_view->destroyed);
+
+  core.NavigateToString(hstring(LR"HTML(
+<!doctype html>
+<script>
+  window.chrome.webview.postMessage({ nonString: true })
+</script>
+)HTML"));
+
   return nullptr;
 }
 

@@ -1,5 +1,3 @@
-const { once } = require('bare-events')
-
 const binding = require('./binding')
 const { Window, WebView, NotificationArea } = require('./')
 
@@ -36,20 +34,20 @@ async function expectRejected(promise, message) {
   throw new Error(`Expected rejection '${message}'`)
 }
 
-function messageWithTimeout(expected) {
+function messageWithTimeout(view, expected) {
   return new Promise((resolve, reject) => {
+    const onMessage = (message) => {
+      if (message !== expected) return
+      clearTimeout(timer)
+      view.off('message', onMessage)
+      resolve()
+    }
     const timer = setTimeout(() => {
+      view.off('message', onMessage)
       reject(new Error(`Timed out waiting for WebView message '${expected}'`))
     }, 10000)
 
-    once(webView, 'message').then(([message]) => {
-      clearTimeout(timer)
-      if (message !== expected) {
-        reject(new Error(`Expected WebView message '${expected}', got '${message}'`))
-      } else {
-        resolve()
-      }
-    }, reject)
+    view.on('message', onMessage)
   })
 }
 
@@ -61,6 +59,7 @@ function shutdown(code) {
     if (pendingWebView !== null) {
       pendingWebView.destroy().destroy()
       binding.webViewTestReleaseReady(pendingWebView._handle)
+      binding.webViewTestReleaseScript(pendingWebView._handle)
     }
     if (webView !== null) webView.destroy().destroy()
     if (notificationArea !== null) notificationArea.destroy().destroy()
@@ -94,6 +93,69 @@ function verifyPartialConstructionFailure() {
   )
 }
 
+async function verifyPendingBridge() {
+  binding.webViewTestHoldScript()
+  pendingWebView = new WebView()
+
+  let navigationSettled = false
+  let messageSettled = false
+  const pageReady = messageWithTimeout(pendingWebView, 'bridge-page-ready')
+  const pageAck = messageWithTimeout(pendingWebView, 'bridge-page-ack')
+  const navigation = pendingWebView
+    .navigateToString(
+      `
+      <!doctype html>
+      <meta charset="utf-8">
+      <script>
+        window.addEventListener('bare-native-message', (event) => {
+          if (event.data === 'bridge-host-ready') {
+            window.bareNative.postMessage('bridge-page-ack')
+          }
+        })
+        setTimeout(() => window.bareNative.postMessage('bridge-page-ready'), 0)
+      </script>
+    `
+    )
+    .then(() => {
+      navigationSettled = true
+    })
+  const message = pendingWebView.postMessage('bridge-host-ready').then(() => {
+    messageSettled = true
+  })
+
+  await waitFor(
+    () => binding.webViewTestScriptPending(pendingWebView._handle),
+    'WebView bridge registration did not become pending'
+  )
+  await delay(0)
+  check(!navigationSettled, 'navigation ran before bridge registration')
+  check(!messageSettled, 'host message ran before bridge registration')
+
+  binding.webViewTestReleaseScript(pendingWebView._handle)
+  await Promise.all([navigation, message])
+  await pageReady
+  await pendingWebView.postMessage('bridge-host-ready')
+  await pageAck
+
+  pendingWebView.destroy().destroy()
+  pendingWebView = null
+}
+
+async function verifyBridgeRegistrationFailure() {
+  binding.webViewTestFailScript()
+  pendingWebView = new WebView()
+
+  let messages = 0
+  pendingWebView.on('message', () => messages++)
+  const pendingOperation = pendingWebView.navigateToString('<p>bridge failed</p>')
+
+  await expectRejected(pendingOperation, 'WebView bridge initialization failed')
+  check(messages === 0, 'WebView delivered a message after bridge failure')
+
+  pendingWebView.destroy().destroy()
+  pendingWebView = null
+}
+
 async function verifyPendingWebViewTeardown() {
   binding.webViewTestHoldReady()
   pendingWebView = new WebView()
@@ -117,7 +179,21 @@ async function verifyPendingWebViewTeardown() {
   pendingWebView = null
 }
 
+async function verifyNonStringMessage() {
+  let messages = 0
+  const onMessage = () => messages++
+  webView.on('message', onMessage)
+
+  binding.webViewTestNonStringMessage(webView._handle)
+  await delay(100)
+
+  webView.off('message', onMessage)
+  check(messages === 0, 'WebView delivered a non-string message')
+}
+
 async function main() {
+  await verifyPendingBridge()
+  await verifyBridgeRegistrationFailure()
   await verifyPendingWebViewTeardown()
 
   window = new Window()
@@ -147,24 +223,24 @@ async function main() {
 
   window.show()
 
-  const pageReady = messageWithTimeout('page-ready')
+  const pageReady = messageWithTimeout(webView, 'page-ready')
   await webView.navigateToString(`
     <!doctype html>
     <meta charset="utf-8">
     <title>bare-win-ui sample</title>
     <script>
-      const bridge = window.chrome.webview
-      bridge.addEventListener('message', (event) => {
-        if (event.data === 'host-ready') bridge.postMessage('page-ack')
+      window.addEventListener('bare-native-message', (event) => {
+        if (event.data === 'host-ready') window.bareNative.postMessage('page-ack')
       })
-      bridge.postMessage('page-ready')
+      window.bareNative.postMessage('page-ready')
     </script>
   `)
   await pageReady
 
-  const pageAck = messageWithTimeout('page-ack')
+  const pageAck = messageWithTimeout(webView, 'page-ack')
   await webView.postMessage('host-ready')
   await pageAck
+  await verifyNonStringMessage()
 
   binding.windowTestCloseRequest(window._handle)
   check(closeEvents === 0, 'native close request destroyed the window')
