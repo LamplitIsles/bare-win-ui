@@ -34,6 +34,7 @@ struct bare_win_ui_web_view_t {
   std::mutex script_lock;
   AsyncStatus pending_script_status;
   bool script_pending = false;
+  bool test_navigation_started = false;
 #endif
 };
 
@@ -520,6 +521,26 @@ bare_win_ui_web_view_test_release_script(js_env_t *env, js_callback_info_t *info
 }
 
 static js_value_t *
+bare_win_ui_web_view_test_navigation_started(js_env_t *env, js_callback_info_t *info) {
+  int err;
+
+  size_t argc = 1;
+  js_value_t *argv[1];
+  err = js_get_callback_info(env, info, &argc, argv, nullptr, nullptr);
+  assert(err == 0);
+  assert(argc == 1);
+
+  bare_win_ui_web_view_t *web_view;
+  err = js_get_value_external(env, argv[0], (void **) &web_view);
+  assert(err == 0);
+
+  js_value_t *result;
+  err = js_get_boolean(env, web_view->test_navigation_started, &result);
+  assert(err == 0);
+  return result;
+}
+
+static js_value_t *
 bare_win_ui_web_view_test_non_string_message(js_env_t *env, js_callback_info_t *info) {
   int err;
 
@@ -541,6 +562,7 @@ bare_win_ui_web_view_test_non_string_message(js_env_t *env, js_callback_info_t *
 <!doctype html>
 <script>
   window.chrome.webview.postMessage({ nonString: true })
+  window.chrome.webview.postMessage('non-string-message-sentinel')
 </script>
 )HTML"));
 
@@ -711,6 +733,10 @@ bare_win_ui_web_view_navigate_to_string(js_env_t *env, js_callback_info_t *info)
   auto core = web_view->handle.CoreWebView2();
   assert(core);
   assert(!web_view->destroyed);
+
+#ifdef BARE_WIN_UI_TESTING
+  web_view->test_navigation_started = true;
+#endif
 
   core.NavigateToString(hstring(html.data(), len));
 

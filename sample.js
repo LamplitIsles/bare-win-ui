@@ -154,6 +154,10 @@ async function verifyBridgeRegistrationFailure() {
     expectRejected(pendingOperation, 'WebView bridge initialization failed'),
     expectRejected(pendingMessage, 'WebView bridge initialization failed')
   ])
+  check(
+    !binding.webViewTestNavigationStarted(pendingWebView._handle),
+    'WebView navigated after bridge failure'
+  )
   check(messages === 0, 'WebView delivered a message after bridge failure')
 
   pendingWebView.destroy().destroy()
@@ -210,15 +214,27 @@ async function verifyPendingWebViewTeardown() {
 }
 
 async function verifyNonStringMessage() {
-  let messages = 0
-  const onMessage = () => messages++
-  webView.on('message', onMessage)
+  const sentinel = 'non-string-message-sentinel'
+  const messages = []
+  const received = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      webView.off('message', onMessage)
+      reject(new Error(`Timed out waiting for WebView message '${sentinel}'`))
+    }, 10000)
+    const onMessage = (message) => {
+      messages.push(message)
+      if (message !== sentinel) return
+      clearTimeout(timer)
+      webView.off('message', onMessage)
+      resolve()
+    }
+    webView.on('message', onMessage)
+  })
 
   binding.webViewTestNonStringMessage(webView._handle)
-  await delay(100)
+  await received
 
-  webView.off('message', onMessage)
-  check(messages === 0, 'WebView delivered a non-string message')
+  check(messages.length === 1 && messages[0] === sentinel, 'WebView delivered a non-string message')
 }
 
 async function main() {
