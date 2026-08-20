@@ -135,6 +135,14 @@ try {
   )
   expectInvalid(hardLink, 'hard link')
 
+  const symbolicLink = stage('symbolic-link')
+  fs.symlinkSync(
+    'Microsoft.WindowsAppRuntime.dll',
+    path.join(symbolicLink, 'linked-runtime.dll'),
+    'file'
+  )
+  expectInvalid(symbolicLink, 'symbolic link')
+
   const registrationRoot = path.join(temporaryRoot, 'registration')
   fs.mkdirSync(registrationRoot, { recursive: true })
   const registrationBase = path.join(registrationRoot, 'runtime.manifest')

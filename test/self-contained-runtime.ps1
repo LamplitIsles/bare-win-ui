@@ -12,194 +12,457 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-if (-not $ManifestTool) {
-  $ManifestTool = Join-Path $PSScriptRoot '..\cmake\self-contained-runtime.js'
-}
-$manifestTool = [IO.Path]::GetFullPath($ManifestTool)
-$PrebuildRoot = [IO.Path]::GetFullPath($PrebuildRoot)
-$SampleAppDirectory = [IO.Path]::GetFullPath($SampleAppDirectory)
-if (-not $StagingRoot) {
-  $StagingRoot = Join-Path ([IO.Path]::GetTempPath()) "bare-win-ui-self-contained-$([Guid]::NewGuid())"
-}
-$StagingRoot = [IO.Path]::GetFullPath($StagingRoot)
-New-Item -ItemType Directory -Path $StagingRoot -Force | Out-Null
+$ownedStagingChild = $null
 
-function Copy-Payload($name) {
-  $destination = Join-Path $StagingRoot $name
-  New-Item -ItemType Directory -Path $destination -Force | Out-Null
-  Copy-Item -Path (Join-Path $PrebuildRoot '*') -Destination $destination -Recurse -Force
-  return $destination
+function Get-FullPath([string]$Path) {
+  if ([string]::IsNullOrWhiteSpace($Path)) {
+    throw 'Path must not be empty'
+  }
+
+  return [IO.Path]::GetFullPath($Path)
 }
 
-function Validate-Payload($root) {
-  & $Node $manifestTool validate $root
-  if ($LASTEXITCODE -ne 0) { throw "Manifest validation failed for $root" }
+function Test-ReparsePoint($Item) {
+  return (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
 }
 
-function Expect-ManifestFailure($label, $root) {
-  & $Node $manifestTool validate $root
-  if ($LASTEXITCODE -eq 0) { throw "$label unexpectedly validated" }
-  Write-Output "$label=PASS"
+function Assert-SafeDirectoryPath([string]$Path, [string]$Label) {
+  $fullPath = Get-FullPath $Path
+  $root = [IO.Path]::GetPathRoot($fullPath)
+  if ([string]::IsNullOrEmpty($root)) {
+    throw "$Label has no filesystem root: $Path"
+  }
+
+  $current = $root
+  $tail = $fullPath.Substring($root.Length)
+  foreach ($segment in ($tail -split '[\\/]')) {
+    if ([string]::IsNullOrEmpty($segment)) { continue }
+
+    $current = [IO.Path]::Combine($current, $segment)
+    $item = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) { continue }
+    if (Test-ReparsePoint $item) {
+      throw "$Label contains a reparse point: $current"
+    }
+    if (-not $item.PSIsContainer) {
+      throw "$Label contains a file in its directory path: $current"
+    }
+  }
+
+  return $fullPath
 }
 
-function Run-Process($executable, $workingDirectory, $userData) {
+function Assert-SafeDirectoryTree([string]$Path, [string]$Label) {
+  $fullPath = Assert-SafeDirectoryPath $Path $Label
+  $root = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop
+  if (-not $root.PSIsContainer) { throw "$Label is not a directory: $fullPath" }
+  if (Test-ReparsePoint $root) { throw "$Label is a reparse point: $fullPath" }
+
+  $pending = New-Object 'System.Collections.Generic.Queue[string]'
+  $pending.Enqueue($fullPath)
+  while ($pending.Count -gt 0) {
+    $directory = $pending.Dequeue()
+    $entries = @(Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop)
+    foreach ($entry in $entries) {
+      if (Test-ReparsePoint $entry) {
+        throw "$Label contains a reparse point: $($entry.FullName)"
+      }
+      if ($entry.PSIsContainer) {
+        $pending.Enqueue($entry.FullName)
+      }
+    }
+  }
+
+  return $fullPath
+}
+
+function Test-ContainedPath([string]$Parent, [string]$Candidate) {
+  $parentFull = Get-FullPath $Parent
+  $candidateFull = Get-FullPath $Candidate
+  $prefix = ($parentFull -replace '[\\/]+$', '') + [IO.Path]::DirectorySeparatorChar
+  return $candidateFull.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Assert-ContainedChild([string]$Parent, [string]$Child, [string]$Label) {
+  if (-not (Test-ContainedPath $Parent $Child)) {
+    throw "$Label is outside its owned parent: $Child"
+  }
+}
+
+function Test-SameOrContainedPath([string]$Parent, [string]$Candidate) {
+  $parentFull = Get-FullPath $Parent
+  $candidateFull = Get-FullPath $Candidate
+  return ($parentFull.Equals($candidateFull, [StringComparison]::OrdinalIgnoreCase) -or
+    (Test-ContainedPath $parentFull $candidateFull))
+}
+
+function Assert-Disjoint([string]$Left, [string]$Right, [string]$Label) {
+  if ((Test-SameOrContainedPath $Left $Right) -or (Test-SameOrContainedPath $Right $Left)) {
+    throw "$Label paths overlap: $Left and $Right"
+  }
+}
+
+function New-OwnedDirectory([string]$Name) {
+  $directory = Join-Path $ownedStagingChild $Name
+  Assert-ContainedChild $ownedStagingChild $directory 'Test staging directory'
+  $existing = Get-Item -LiteralPath $directory -Force -ErrorAction SilentlyContinue
+  if ($null -ne $existing) {
+    throw "Test staging directory already exists: $directory"
+  }
+
+  [void](New-Item -ItemType Directory -Path $directory -ErrorAction Stop)
+  $created = Get-Item -LiteralPath $directory -Force -ErrorAction Stop
+  if (-not $created.PSIsContainer -or (Test-ReparsePoint $created)) {
+    throw "Test staging directory is unsafe: $directory"
+  }
+
+  return $directory
+}
+
+function Copy-DirectoryContents([string]$Source, [string]$Destination) {
+  $sourceFull = Assert-SafeDirectoryPath $Source 'Copy source'
+  $destinationFull = Assert-SafeDirectoryPath $Destination 'Copy destination'
+  Assert-ContainedChild $ownedStagingChild $destinationFull 'Test copy destination'
+
+  if (-not (Test-Path -LiteralPath $destinationFull -PathType Container)) {
+    [void](New-Item -ItemType Directory -Path $destinationFull -ErrorAction Stop)
+  }
+  $destinationItem = Get-Item -LiteralPath $destinationFull -Force -ErrorAction Stop
+  if (Test-ReparsePoint $destinationItem) {
+    throw "Test copy destination is a reparse point: $destinationFull"
+  }
+
+  foreach ($entry in @(Get-ChildItem -LiteralPath $sourceFull -Force -ErrorAction Stop)) {
+    Copy-Item -LiteralPath $entry.FullName -Destination $destinationFull -Recurse -Force -ErrorAction Stop
+  }
+}
+
+function Remove-TestFile([string]$Path) {
+  $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+  if ($null -eq $item) { return }
+  if ($item.PSIsContainer -or (Test-ReparsePoint $item)) {
+    throw "Test marker is not a regular file: $Path"
+  }
+
+  Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+}
+
+function Remove-OwnedTree([string]$Path) {
+  if (-not (Test-SameOrContainedPath $ownedStagingChild $Path)) {
+    throw "Refusing to remove path outside owned staging child: $Path"
+  }
+
+  $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+  if (Test-ReparsePoint $item) {
+    throw "Refusing to recurse through reparse point: $Path"
+  }
+  if (-not $item.PSIsContainer) {
+    Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+    return
+  }
+
+  foreach ($entry in @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop)) {
+    $currentEntry = Get-Item -LiteralPath $entry.FullName -Force -ErrorAction SilentlyContinue
+    if ($null -eq $currentEntry) { continue }
+    $entry = $currentEntry
+
+    if (Test-ReparsePoint $entry) {
+      Remove-Item -LiteralPath $entry.FullName -Force -ErrorAction Stop
+    } elseif ($entry.PSIsContainer) {
+      Remove-OwnedTree $entry.FullName
+    } else {
+      Remove-Item -LiteralPath $entry.FullName -Force -ErrorAction Stop
+    }
+  }
+  Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+}
+
+function Validate-Payload([string]$Root) {
+  & $Node $manifestTool validate $Root
+  if ($LASTEXITCODE -ne 0) {
+    throw "Manifest validation failed for $Root"
+  }
+}
+
+function Expect-ManifestFailure([string]$Label, [string]$Root) {
+  & $Node $manifestTool validate $Root
+  if ($LASTEXITCODE -eq 0) {
+    throw "$Label unexpectedly validated"
+  }
+  Write-Output "$Label=PASS"
+}
+
+function Get-SampleExecutable([string]$Root, [string]$PayloadRoot) {
+  $executables = @(
+    Get-ChildItem -LiteralPath $Root -Filter '*.exe' -File -Force -ErrorAction Stop |
+      Where-Object {
+        -not (Test-Path -LiteralPath (Join-Path $PayloadRoot $_.Name) -PathType Leaf)
+      }
+  )
+  if ($executables.Count -ne 1) {
+    throw "Expected exactly one native sample executable outside the payload in $Root, found $($executables.Count)"
+  }
+
+  $executable = Get-Item -LiteralPath $executables[0].FullName -Force -ErrorAction Stop
+  if ($executable.PSIsContainer -or (Test-ReparsePoint $executable)) {
+    throw "Native sample executable is unsafe: $($executable.FullName)"
+  }
+
+  return $executable.FullName
+}
+
+function Get-ExecutableDependencies([string]$Executable) {
+  $file = Get-Item -LiteralPath $Executable -Force -ErrorAction Stop
+  if ($file.PSIsContainer -or (Test-ReparsePoint $file)) {
+    throw "Executable is unsafe: $Executable"
+  }
+
+  $output = (& $Dumpbin /DEPENDENTS $Executable 2>&1 | Out-String)
+  if ($LASTEXITCODE -ne 0) {
+    throw "Unable to inspect executable imports: $Executable"
+  }
+
+  return $output
+}
+
+function Assert-SelfContainedImports([string]$Executable) {
+  $dependencies = Get-ExecutableDependencies $Executable
+  if ($dependencies -notmatch '(?im)^\s*Microsoft\.WindowsAppRuntime\.dll\s*$') {
+    throw "Executable does not import Microsoft.WindowsAppRuntime.dll: $Executable"
+  }
+  if ($dependencies -match '(?im)Microsoft\.WindowsAppRuntime\.Bootstrap\.dll') {
+    throw "Executable imports the Bootstrap DLL: $Executable"
+  }
+
+  $bootstrap = Join-Path ([IO.Path]::GetDirectoryName($Executable)) 'Microsoft.WindowsAppRuntime.Bootstrap.dll'
+  if (Test-Path -LiteralPath $bootstrap) {
+    throw "Sample app ships the Bootstrap DLL: $bootstrap"
+  }
+}
+
+function Assert-Marker([string]$Root, [bool]$Expected) {
+  $marker = Join-Path $Root 'bare-win-ui-application-constructed.marker'
+  $exists = Test-Path -LiteralPath $marker -PathType Leaf
+  if ($exists -ne $Expected) {
+    if ($Expected) {
+      throw "Application construction marker was not created: $marker"
+    }
+    throw "Application construction marker was created unexpectedly: $marker"
+  }
+}
+
+function New-ProcessStartInfo([string]$Executable, [string]$WorkingDirectory, [string]$UserData) {
   $psi = New-Object Diagnostics.ProcessStartInfo
-  $psi.FileName = $executable
-  $psi.WorkingDirectory = $workingDirectory
+  $psi.FileName = $Executable
+  $psi.WorkingDirectory = $WorkingDirectory
   $psi.UseShellExecute = $false
-  if ($userData) { $psi.EnvironmentVariables['WEBVIEW2_USER_DATA_FOLDER'] = $userData }
+  if ($UserData) {
+    $psi.EnvironmentVariables['WEBVIEW2_USER_DATA_FOLDER'] = $UserData
+  }
+  return $psi
+}
+
+function Run-Process([string]$Executable, [string]$WorkingDirectory, [string]$UserData) {
+  $psi = New-ProcessStartInfo $Executable $WorkingDirectory $UserData
   $process = New-Object Diagnostics.Process
   $process.StartInfo = $psi
-  [void]$process.Start()
-  if (-not $process.WaitForExit(60000)) {
-    $process.Kill()
-    throw "Process timed out: $executable"
+  try {
+    $started = $process.Start()
+    if (-not $started) { throw "Process did not start: $Executable" }
+    if (-not $process.WaitForExit(60000)) {
+      [void]$process.Kill()
+      throw "Process timed out: $Executable"
+    }
+
+    return $process.ExitCode
+  } finally {
+    $process.Dispose()
   }
-  return $process.ExitCode
+}
+
+function Run-ExpectedFailure([string]$Label, [string]$Executable, [string]$WorkingDirectory, [string]$UserData) {
+  $psi = New-ProcessStartInfo $Executable $WorkingDirectory $UserData
+  $process = New-Object Diagnostics.Process
+  $process.StartInfo = $psi
+  $loaderRejected = $false
+  $started = $false
+  $exitCode = $null
+  try {
+    try {
+      $started = $process.Start()
+    } catch [System.ComponentModel.Win32Exception] {
+      if ($_.Exception.NativeErrorCode -ne 126) { throw }
+      $loaderRejected = $true
+    }
+
+    if (-not $loaderRejected) {
+      if (-not $started) { throw "Process did not start: $Executable" }
+      if (-not $process.WaitForExit(30000)) {
+        [void]$process.Kill()
+        throw "$Label process timed out"
+      }
+      $exitCode = $process.ExitCode
+      if ($exitCode -eq 0) {
+        throw "$Label unexpectedly exited successfully"
+      }
+    }
+  } finally {
+    if ($started -and -not $process.HasExited) {
+      try { [void]$process.Kill() } catch {}
+    }
+    $process.Dispose()
+  }
+
+  if ($loaderRejected) {
+    Write-Output "$Label=PASS (Windows loader rejected dependency with error 126)"
+  } else {
+    Write-Output "$Label=PASS (exit $exitCode)"
+  }
 }
 
 try {
-  $complete = Copy-Payload 'complete'
-  Validate-Payload $complete
-
-  $manifestPath = Join-Path $complete 'self-contained-runtime.json'
-  $before = [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))
-  & $Node $manifestTool generate $complete
-  if ($LASTEXITCODE -ne 0) { throw 'Manifest regeneration failed' }
-  $after = [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))
-  if ($before -ne $after) { throw 'Manifest generation was not deterministic' }
-
-  $manifest = Get-Content -Raw $manifestPath | ConvertFrom-Json
-  if ($manifest.schemaVersion -ne 1 -or $manifest.architecture -ne 'x64') {
-    throw 'Manifest schema or architecture is incorrect'
+  if (-not $ManifestTool) {
+    $ManifestTool = Join-Path $PSScriptRoot '..\cmake\self-contained-runtime.js'
   }
-  $paths = @($manifest.files | ForEach-Object { $_.path })
-  if ($paths -contains 'self-contained-runtime.json' -or $paths -contains 'bare.exe' -or
-      $paths -contains 'Microsoft.Web.WebView2.Core.dll') {
-    throw 'Manifest includes an excluded file'
+  $manifestTool = Get-FullPath $ManifestTool
+  $prebuildRoot = Assert-SafeDirectoryTree (Get-FullPath $PrebuildRoot) 'Prebuild root'
+  $sampleSource = Assert-SafeDirectoryTree (Get-FullPath $SampleAppDirectory) 'Sample app directory'
+
+  if (Test-Path -LiteralPath (Join-Path $prebuildRoot 'Microsoft.WindowsAppRuntime.Bootstrap.dll')) {
+    throw 'x64 prebuild ships the Bootstrap DLL'
   }
-  for ($index = 0; $index -lt $paths.Count; $index++) {
-    $path = $paths[$index]
-    $segments = $path.Split('/')
-    if ($path.Contains('\') -or $segments.Count -eq 0 -or
-        ($segments | Where-Object { $_ -eq '' -or $_ -eq '.' -or $_ -eq '..' })) {
-      throw "Unsafe manifest path: $path"
+
+  $stagingParentProvided = $PSBoundParameters.ContainsKey('StagingRoot')
+  if ($stagingParentProvided) {
+    if ([string]::IsNullOrWhiteSpace($StagingRoot)) {
+      throw '-StagingRoot must name an existing test-owned parent directory'
     }
-    if ($index -gt 0 -and [String]::CompareOrdinal($paths[$index - 1], $path) -ge 0) {
-      throw 'Manifest paths are not ordinal-sorted and unique'
+    $stagingParent = Assert-SafeDirectoryPath (Get-FullPath $StagingRoot) 'Staging parent'
+    $stagingParentItem = Get-Item -LiteralPath $stagingParent -Force -ErrorAction Stop
+    if (-not $stagingParentItem.PSIsContainer -or (Test-ReparsePoint $stagingParentItem)) {
+      throw "Staging parent is unsafe: $stagingParent"
     }
-    $candidate = [IO.Path]::GetFullPath((Join-Path $complete ($path -replace '/', '\')))
-    $rootPrefix = "$([IO.Path]::GetFullPath($complete).TrimEnd('\'))\"
-    if (-not $candidate.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-      throw "Manifest path escapes the payload root: $path"
-    }
+  } else {
+    $stagingParent = Get-FullPath (Join-Path ([IO.Path]::GetTempPath()) "bare-win-ui-self-contained-parent-$([Guid]::NewGuid().ToString('N'))")
+    [void](Assert-SafeDirectoryPath $stagingParent 'Generated staging parent')
+    [void](New-Item -ItemType Directory -Path $stagingParent -ErrorAction Stop)
   }
-  Write-Output 'schema-determinism-containment=PASS'
 
-  $missing = Copy-Payload 'missing'
-  Remove-Item (Join-Path $missing 'Microsoft.WindowsAppRuntime.dll')
-  Expect-ManifestFailure 'missing-payload' $missing
-
-  $altered = Copy-Payload 'altered'
-  [IO.File]::AppendAllText((Join-Path $altered 'Microsoft.WindowsAppRuntime.pri'), 'altered')
-  Expect-ManifestFailure 'altered-payload' $altered
-
-  $duplicate = Copy-Payload 'duplicate'
-  $duplicateManifestPath = Join-Path $duplicate 'self-contained-runtime.json'
-  $duplicateManifest = Get-Content -Raw $duplicateManifestPath | ConvertFrom-Json
-  $duplicateManifest.files = @($duplicateManifest.files) + @($duplicateManifest.files[0])
-  $duplicateManifest | ConvertTo-Json -Depth 10 | Set-Content $duplicateManifestPath
-  Expect-ManifestFailure 'duplicate-payload-entry' $duplicate
-
-  $unmanifested = Copy-Payload 'unmanifested'
-  Set-Content (Join-Path $unmanifested 'unmanifested-runtime.dll') 'unmanifested'
-  Expect-ManifestFailure 'unmanifested-payload' $unmanifested
-
-  $unsafe = Copy-Payload 'unsafe'
-  $unsafeManifestPath = Join-Path $unsafe 'self-contained-runtime.json'
-  $unsafeManifest = Get-Content -Raw $unsafeManifestPath | ConvertFrom-Json
-  $unsafeManifest.files[0].path = '../escape.dll'
-  $unsafeManifest | ConvertTo-Json -Depth 10 | Set-Content $unsafeManifestPath
-  Expect-ManifestFailure 'unsafe-payload-path' $unsafe
-
-  $hardLink = Copy-Payload 'hard-link'
-  New-Item -ItemType HardLink -Path (Join-Path $hardLink 'linked-runtime.dll') -Target (Join-Path $hardLink 'Microsoft.WindowsAppRuntime.dll') | Out-Null
-  Expect-ManifestFailure 'linked-payload' $hardLink
-
-  $prebuild = Join-Path (Split-Path $PrebuildRoot) 'bare.exe'
-  $dependencies = & $Dumpbin /DEPENDENTS $prebuild | Out-String
-  if ($dependencies -notmatch '(?im)^\s*Microsoft\.WindowsAppRuntime\.dll\s*$') {
-    throw 'Executable does not import Microsoft.WindowsAppRuntime.dll'
+  $stagingParentItem = Get-Item -LiteralPath $stagingParent -Force -ErrorAction Stop
+  if (-not $stagingParentItem.PSIsContainer -or (Test-ReparsePoint $stagingParentItem)) {
+    throw "Staging parent is unsafe: $stagingParent"
   }
-  if ($dependencies -match '(?im)Microsoft\.WindowsAppRuntime\.Bootstrap\.dll') {
-    throw 'Executable imports the Bootstrap DLL'
-  }
-  if (Test-Path (Join-Path $PrebuildRoot 'Microsoft.WindowsAppRuntime.Bootstrap.dll')) {
-    throw 'x64 payload ships the Bootstrap DLL'
-  }
-  Write-Output 'imports-and-bootstrap-exclusion=PASS'
 
-  $healthy = Join-Path $StagingRoot 'healthy-app'
-  New-Item -ItemType Directory -Path $healthy -Force | Out-Null
-  Copy-Item -Path (Join-Path $SampleAppDirectory '*') -Destination $healthy -Recurse -Force
-  $healthyExe = (Get-ChildItem $healthy -Filter '*.exe' | Select-Object -First 1).FullName
+  Assert-Disjoint $stagingParent $prebuildRoot 'Staging and prebuild'
+  Assert-Disjoint $stagingParent $sampleSource 'Staging and sample app'
+
+  $stagingCandidate = Join-Path $stagingParent "run-$([Guid]::NewGuid().ToString('N'))"
+  Assert-ContainedChild $stagingParent $stagingCandidate 'Owned staging child'
+  if ($null -ne (Get-Item -LiteralPath $stagingCandidate -Force -ErrorAction SilentlyContinue)) {
+    throw "Owned staging child already exists: $stagingCandidate"
+  }
+  [void](New-Item -ItemType Directory -Path $stagingCandidate -ErrorAction Stop)
+  $ownedStagingChild = $stagingCandidate
+  $ownedItem = Get-Item -LiteralPath $ownedStagingChild -Force -ErrorAction Stop
+  if (-not $ownedItem.PSIsContainer -or (Test-ReparsePoint $ownedItem)) {
+    throw "Owned staging child is unsafe: $ownedStagingChild"
+  }
+
+  Validate-Payload $prebuildRoot
+  Write-Output 'prebuild-manifest=PASS'
+
+  $hardLinkPayload = New-OwnedDirectory 'hard-link-payload'
+  Copy-DirectoryContents $prebuildRoot $hardLinkPayload
+  New-Item -ItemType HardLink `
+    -Path (Join-Path $hardLinkPayload 'linked-runtime.dll') `
+    -Target (Join-Path $hardLinkPayload 'Microsoft.WindowsAppRuntime.dll') | Out-Null
+  Expect-ManifestFailure 'hard-link-payload' $hardLinkPayload
+
+  $symbolicLinkPayload = New-OwnedDirectory 'symbolic-link-payload'
+  Copy-DirectoryContents $prebuildRoot $symbolicLinkPayload
+  New-Item -ItemType SymbolicLink `
+    -Path (Join-Path $symbolicLinkPayload 'linked-runtime.dll') `
+    -Target (Join-Path $symbolicLinkPayload 'Microsoft.WindowsAppRuntime.dll') | Out-Null
+  Expect-ManifestFailure 'symbolic-link-payload' $symbolicLinkPayload
+
+  $missingPayload = New-OwnedDirectory 'missing-payload'
+  Copy-DirectoryContents $prebuildRoot $missingPayload
+  Remove-Item -LiteralPath (Join-Path $missingPayload 'Microsoft.WindowsAppRuntime.dll') -Force -ErrorAction Stop
+  Expect-ManifestFailure 'missing-payload' $missingPayload
+
+  $alteredPayload = New-OwnedDirectory 'altered-payload'
+  Copy-DirectoryContents $prebuildRoot $alteredPayload
+  [IO.File]::AppendAllText((Join-Path $alteredPayload 'Microsoft.WindowsAppRuntime.pri'), 'altered')
+  Expect-ManifestFailure 'altered-payload' $alteredPayload
+
+  $sampleApp = New-OwnedDirectory 'sample-app'
+  Copy-DirectoryContents $sampleSource $sampleApp
+
+  # The app root also contains Bare's executable/bundles and WebView2. Keep
+  # the manifest boundary as a payload-only child, validate it through the
+  # Node SSOT, then copy those exact bytes beside the executable.
+  $samplePayload = Join-Path $sampleApp 'validated-payload'
+  [void](Assert-SafeDirectoryPath $samplePayload 'Staged sample payload')
+  [void](New-Item -ItemType Directory -Path $samplePayload -ErrorAction Stop)
+  Copy-DirectoryContents $prebuildRoot $samplePayload
+  Validate-Payload $samplePayload
+  Copy-DirectoryContents $samplePayload $sampleApp
+  Remove-OwnedTree $samplePayload
+  Write-Output 'staged-sample-manifest=PASS'
+
+  $sampleMarker = Join-Path $sampleApp 'bare-win-ui-application-constructed.marker'
+  Remove-TestFile $sampleMarker
+  $sampleExecutable = Get-SampleExecutable $sampleApp $prebuildRoot
+  Assert-SelfContainedImports $sampleExecutable
+  Write-Output 'launched-sample-imports=PASS'
+
+  $healthy = $sampleApp
+  $healthyMarker = Join-Path $healthy 'bare-win-ui-application-constructed.marker'
+  Remove-TestFile $healthyMarker
+  $healthyExecutable = Get-SampleExecutable $healthy $prebuildRoot
+  Assert-SelfContainedImports $healthyExecutable
   $healthyData = Join-Path $healthy 'WebView2'
-  $healthyExit = Run-Process $healthyExe $healthy $healthyData
+  [void](New-Item -ItemType Directory -Path $healthyData -Force -ErrorAction Stop)
+  $healthyExit = Run-Process $healthyExecutable $healthy $healthyData
   if ($healthyExit -ne 0) { throw "Healthy sample exited $healthyExit" }
+  Assert-Marker $healthy $true
   Write-Output 'healthy-native-sample=PASS'
+  Remove-TestFile $healthyMarker
+  Remove-OwnedTree $healthyData
 
-  $damaged = Join-Path $StagingRoot 'damaged-import'
-  New-Item -ItemType Directory -Path $damaged -Force | Out-Null
-  Copy-Item -Path (Join-Path $SampleAppDirectory '*') -Destination $damaged -Recurse -Force
-  Remove-Item (Join-Path $damaged 'Microsoft.WindowsAppRuntime.dll')
-  $damagedExe = (Get-ChildItem $damaged -Filter '*.exe' | Select-Object -First 1).FullName
-  $started = $false
-  try {
-    $psi = New-Object Diagnostics.ProcessStartInfo
-    $psi.FileName = $damagedExe
-    $psi.WorkingDirectory = $damaged
-    $psi.UseShellExecute = $false
-    $process = New-Object Diagnostics.Process
-    $process.StartInfo = $psi
-    [void]$process.Start()
-    $started = $true
-    if (-not $process.WaitForExit(30000)) {
-      $process.Kill()
-      throw 'Damaged payload process timed out'
-    }
-    if ($process.ExitCode -eq 0) { throw 'Damaged imported DLL unexpectedly allowed startup' }
-  } catch {
-    if ($started) { throw }
-  }
-  Write-Output 'damaged-import-nonzero=PASS'
+  $missing = New-OwnedDirectory 'missing-import'
+  Copy-DirectoryContents $sampleApp $missing
+  $missingExecutable = Get-SampleExecutable $missing $prebuildRoot
+  Assert-SelfContainedImports $missingExecutable
+  Remove-Item -LiteralPath (Join-Path $missing 'Microsoft.WindowsAppRuntime.dll') -Force -ErrorAction Stop
+  Remove-TestFile (Join-Path $missing 'bare-win-ui-application-constructed.marker')
+  $missingData = Join-Path $missing 'WebView2'
+  [void](New-Item -ItemType Directory -Path $missingData -Force -ErrorAction Stop)
+  Run-ExpectedFailure 'missing-import-nonzero' $missingExecutable $missing $missingData
+  Assert-Marker $missing $false
 
-  $alteredImport = Join-Path $StagingRoot 'altered-import'
-  New-Item -ItemType Directory -Path $alteredImport -Force | Out-Null
-  Copy-Item -Path (Join-Path $SampleAppDirectory '*') -Destination $alteredImport -Recurse -Force
-  $runtimeDll = Join-Path $alteredImport 'Microsoft.WindowsAppRuntime.dll'
+  $altered = New-OwnedDirectory 'altered-import'
+  Copy-DirectoryContents $sampleApp $altered
+  $alteredExecutable = Get-SampleExecutable $altered $prebuildRoot
+  Assert-SelfContainedImports $alteredExecutable
+  $runtimeDll = Join-Path $altered 'Microsoft.WindowsAppRuntime.dll'
   $runtimeBytes = [IO.File]::ReadAllBytes($runtimeDll)
-  $runtimeBytes[0] = $runtimeBytes[0] -bxor 0xff
+  if ($runtimeBytes.Length -eq 0) { throw "Runtime DLL is empty: $runtimeDll" }
+  $runtimeBytes[0] = [byte]($runtimeBytes[0] -bxor 0xff)
   [IO.File]::WriteAllBytes($runtimeDll, $runtimeBytes)
-  $alteredImportExe = (Get-ChildItem $alteredImport -Filter '*.exe' | Select-Object -First 1).FullName
-  $started = $false
-  try {
-    $psi = New-Object Diagnostics.ProcessStartInfo
-    $psi.FileName = $alteredImportExe
-    $psi.WorkingDirectory = $alteredImport
-    $psi.UseShellExecute = $false
-    $process = New-Object Diagnostics.Process
-    $process.StartInfo = $psi
-    [void]$process.Start()
-    $started = $true
-    if (-not $process.WaitForExit(30000)) {
-      $process.Kill()
-      throw 'Altered imported DLL process timed out'
-    }
-    if ($process.ExitCode -eq 0) { throw 'Altered imported DLL unexpectedly allowed startup' }
-  } catch {
-    if ($started) { throw }
-  }
-  Write-Output 'altered-import-nonzero=PASS'
+  Remove-TestFile (Join-Path $altered 'bare-win-ui-application-constructed.marker')
+  $alteredData = Join-Path $altered 'WebView2'
+  [void](New-Item -ItemType Directory -Path $alteredData -Force -ErrorAction Stop)
+  Run-ExpectedFailure 'altered-import-nonzero' $alteredExecutable $altered $alteredData
+  Assert-Marker $altered $false
 } finally {
-  Remove-Item $StagingRoot -Recurse -Force -ErrorAction SilentlyContinue
+  if ($null -ne $ownedStagingChild) {
+    $ownedItem = Get-Item -LiteralPath $ownedStagingChild -Force -ErrorAction SilentlyContinue
+    if ($null -ne $ownedItem) {
+      if (-not $ownedItem.PSIsContainer -or (Test-ReparsePoint $ownedItem)) {
+        throw "Refusing to remove unsafe owned staging child: $ownedStagingChild"
+      }
+      Remove-OwnedTree $ownedStagingChild
+    }
+  }
 }

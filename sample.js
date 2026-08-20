@@ -243,6 +243,8 @@ async function verifyNonStringMessage() {
 }
 
 async function main() {
+  binding.applicationTestMarkConstructed('bare-win-ui-application-constructed.marker')
+
   await verifyPendingBridge()
   await verifyBridgeRegistrationFailure()
   await verifyPendingBridgeTeardown()

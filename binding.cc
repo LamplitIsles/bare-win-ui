@@ -3,10 +3,77 @@
 #include <js.h>
 #include <utf.h>
 
+#include <windows.h>
+
+#include <vector>
+
 #include "lib/notification-area.h"
 #include "lib/package-manager.h"
 #include "lib/web-view.h"
 #include "lib/window.h"
+
+#ifdef BARE_WIN_UI_TESTING
+static js_value_t *
+bare_win_ui_application_test_mark_constructed(
+  js_env_t *env,
+  js_callback_info_t *info
+) {
+  int err;
+
+  size_t argc = 1;
+  js_value_t *argv[1];
+  err = js_get_callback_info(env, info, &argc, argv, nullptr, nullptr);
+  assert(err == 0);
+  assert(argc == 1);
+
+  size_t len;
+  err = js_get_value_string_utf16le(env, argv[0], nullptr, 0, &len);
+  assert(err == 0);
+
+  std::vector<wchar_t> path(len + 1);
+  err = js_get_value_string_utf16le(
+    env,
+    argv[0],
+    reinterpret_cast<utf16_t *>(path.data()),
+    len,
+    nullptr
+  );
+  assert(err == 0);
+  path[len] = L'\0';
+
+  HANDLE marker = CreateFileW(
+    path.data(),
+    GENERIC_WRITE,
+    0,
+    nullptr,
+    CREATE_ALWAYS,
+    FILE_ATTRIBUTE_NORMAL,
+    nullptr
+  );
+  if (marker == INVALID_HANDLE_VALUE) {
+    js_throw_error(
+      env,
+      "ERR_TEST_MARKER",
+      "could not create application construction marker"
+    );
+    return nullptr;
+  }
+
+  constexpr char contents[] = "constructed\n";
+  DWORD written;
+  BOOL success = WriteFile(marker, contents, sizeof(contents) - 1, &written, nullptr);
+  BOOL closed = CloseHandle(marker);
+  if (!success || !closed || written != sizeof(contents) - 1) {
+    js_throw_error(
+      env,
+      "ERR_TEST_MARKER",
+      "could not write application construction marker"
+    );
+  }
+
+  return nullptr;
+}
+#endif
 
 static js_value_t *
 bare_win_ui_exports(js_env_t *env, js_value_t *exports) {
@@ -31,6 +98,9 @@ bare_win_ui_exports(js_env_t *env, js_value_t *exports) {
   V("windowHide", bare_win_ui_window_hide)
   V("windowClose", bare_win_ui_window_close)
   V("windowTestCloseRequest", bare_win_ui_window_test_close_request)
+#ifdef BARE_WIN_UI_TESTING
+  V("applicationTestMarkConstructed", bare_win_ui_application_test_mark_constructed)
+#endif
   V("windowResize", bare_win_ui_window_resize)
   V("windowResizeClient", bare_win_ui_window_resize_client)
 

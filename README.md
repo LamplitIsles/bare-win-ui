@@ -83,9 +83,12 @@ Copy-Item -Recurse -Force prebuilds\win32-x64\bare\* sample-build\bare-win-ui\Ap
 
 The x64 install contains the complete Windows App SDK runtime tree beside the
 prebuild, including locale/resource subdirectories and WinMD metadata. The
-manifest is the boundary for copying that tree. `bare-build` still flattens
-runtime dependencies, so the explicit copy above is required for this native
-check; this PR does not change bare-build's runtime dependency format.
+manifest is the single semantic boundary for consumers copying that tree: the
+consumer validates the manifest and copies its listed paths without flattening
+their relative locations. `bare-build` still flattens runtime dependencies, so
+the explicit copy above is required for this native check; this PR does not
+change bare-build's runtime dependency format or claim that `runtime.js` stages
+the complete tree.
 
 The sample exits nonzero on a failed readiness/message exchange, native close
 request cancellation and reuse of the same window, native menu selection,
@@ -106,8 +109,13 @@ bare-build --base . --host win32-x64 --runtime ./runtime.js --out no-window-buil
 
 It must exit promptly with code 1 without creating native UI.
 
-The test-owned Windows acceptance copy checks the exact manifest, import table,
-healthy sample, damaged payload, and all manifest mutation cases:
+The Windows acceptance script creates one unique test-owned child beneath an
+optional caller-provided test-owned `-StagingRoot` parent. It removes only that
+child and never recursively removes the parent. It checks the exact manifest,
+import table, healthy sample, damaged payload, and link mutation cases. All
+manifest schema, inventory, path, and hash decisions come from
+`cmake/self-contained-runtime.js`; PowerShell supplies only Windows file,
+import, process, and application-marker orchestration:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\test\self-contained-runtime.ps1 `
