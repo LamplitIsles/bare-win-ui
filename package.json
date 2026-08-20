@@ -23,7 +23,7 @@
   "scripts": {
     "format": "prettier --write . && lunte --fix",
     "lint": "prettier --check . && lunte",
-    "test": "brittle-bare --coverage test.js"
+    "test": "brittle-bare --coverage test.js && node test/self-contained-runtime.js"
   },
   "repository": {
     "type": "git",

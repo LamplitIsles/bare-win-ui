@@ -11,7 +11,9 @@
 #include <rlimit.h>
 #include <uv.h>
 
+#ifndef BARE_WIN_UI_SELF_CONTAINED
 #include "bootstrap.h"
+#endif
 #include "windows-app-sdk.h"
 
 static uv_barrier_t bare__platform_ready;
@@ -274,7 +276,9 @@ main(int argc, char *argv[]) {
   err = bare_setup(bare__loop, bare__platform, nullptr, argc, const_cast<const char **>(argv), nullptr, &bare);
   assert(err == 0);
 
+#ifndef BARE_WIN_UI_SELF_CONTAINED
   bare__try_bootstrap_runtime();
+#endif
 
   Application::Start([=](auto &&) { make<BareApp>(); });
 

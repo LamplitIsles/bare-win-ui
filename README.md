@@ -75,9 +75,17 @@ bridge-specific controls:
 bare-make generate --source . --build build --platform win32 --arch x64 --define BARE_WIN_UI_TESTING:BOOL=ON
 bare-make build --build build
 bare-make install --build build --prefix prebuilds
+node ./cmake/self-contained-runtime.js validate prebuilds/win32-x64/bare
 bare-build --base . --host win32-x64 --runtime ./runtime.js --out sample-build sample.js
-.\\sample-build\\bare-win-ui\\App\\bare-win-ui.exe
+Copy-Item -Recurse -Force prebuilds\win32-x64\bare\* sample-build\bare-win-ui\App\
+.\sample-build\bare-win-ui\App\bare-win-ui.exe
 ```
+
+The x64 install contains the complete Windows App SDK runtime tree beside the
+prebuild, including locale/resource subdirectories and WinMD metadata. The
+manifest is the boundary for copying that tree. `bare-build` still flattens
+runtime dependencies, so the explicit copy above is required for this native
+check; this PR does not change bare-build's runtime dependency format.
 
 The sample exits nonzero on a failed readiness/message exchange, native close
 request cancellation and reuse of the same window, native menu selection,
@@ -97,6 +105,22 @@ bare-build --base . --host win32-x64 --runtime ./runtime.js --out no-window-buil
 ```
 
 It must exit promptly with code 1 without creating native UI.
+
+The test-owned Windows acceptance copy checks the exact manifest, import table,
+healthy sample, damaged payload, and all manifest mutation cases:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\test\self-contained-runtime.ps1 `
+  -PrebuildRoot .\prebuilds\win32-x64\bare `
+  -SampleAppDirectory .\sample-build\bare-win-ui\App `
+  -Node node.exe `
+  -Dumpbin dumpbin.exe `
+  -ManifestTool .\cmake\self-contained-runtime.js
+```
+
+For adapter compatibility evidence, run the same manifest-validated
+`prebuilds/win32-x64` tree and the same copied sample directory on Windows 10
+build 19045 and Windows 11 x64. This is not a claim of Kepos product support.
 
 ## License
 

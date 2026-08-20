@@ -12,6 +12,15 @@ function(fetch_nuget_package name version result)
     PARSE_ARGV 3 ARGV "" "${one_value_keywords}" "${multi_value_keywords}"
   )
 
+  if(NOT ARGV_SHA256)
+    message(FATAL_ERROR "NuGet package '${name} ${version}' must have a pinned SHA-256")
+  endif()
+
+  string(LENGTH "${ARGV_SHA256}" sha256_length)
+  if(NOT sha256_length EQUAL 64 OR NOT ARGV_SHA256 MATCHES "^[0-9a-fA-F]+$")
+    message(FATAL_ERROR "NuGet package '${name} ${version}' has an invalid SHA-256")
+  endif()
+
   set(prefix "${CMAKE_CURRENT_BINARY_DIR}/_nuget/${name}/${version}")
 
   set(target "${name}_${version}")
@@ -93,6 +102,7 @@ fetch_nuget_package(
   Microsoft.Windows.CppWinRT
   2.0.250303.1
   CppWinRT
+  SHA256 955e3051b35db1c00177ed14ab6b7b995c3b32a53fdb6c184ea53b1dba66e439
   BUILD_COMMAND "<SOURCE_DIR>/bin/cppwinrt.exe" -in local -output "<BINARY_DIR>/include"
 )
 
@@ -114,6 +124,7 @@ fetch_nuget_package(
   Microsoft.Web.WebView2
   1.0.3595.46
   WebView2
+  SHA256 f448c20859199ecd846a7d693710d143a8cd019ad1dcdc4cd6332d842d871054
   BUILD_COMMAND
     "${CppWinRT_SOURCE_DIR}/bin/cppwinrt.exe"
     -ref sdk
@@ -148,6 +159,7 @@ fetch_nuget_package(
   Microsoft.WindowsAppSDK.Base
   1.8.250831001
   WindowsAppSDK_Base
+  SHA256 76c20ad89f166ef204cd698648d1b160ded1d71607aeebcfb8303e1a539a4937
   BUILD_COMMAND
     "${CppWinRT_SOURCE_DIR}/bin/cppwinrt.exe"
     -ref sdk
@@ -171,6 +183,7 @@ fetch_nuget_package(
   Microsoft.WindowsAppSDK.InteractiveExperiences
   1.8.251104001
   WindowsAppSDK_InteractiveExperiences
+  SHA256 228887d702976fc660b549d7e34a9ae5f58fa5856e02d1c6095254b5eb566423
   BUILD_COMMAND
     "${CppWinRT_SOURCE_DIR}/bin/cppwinrt.exe"
     -ref sdk
@@ -219,6 +232,7 @@ fetch_nuget_package(
   Microsoft.WindowsAppSDK.Foundation
   1.8.251104000
   WindowsAppSDK_Foundation
+  SHA256 45321e61a49c818f5d066f3d95b60144cc20ab60e17169e5cc6dd317d0348157
   BUILD_COMMAND
     "${CppWinRT_SOURCE_DIR}/bin/cppwinrt.exe"
     -ref sdk
@@ -240,21 +254,94 @@ target_include_directories(
     "${WindowsAppSDK_Foundation_BINARY_DIR}/include"
 )
 
-add_library(WindowsAppSDK_Bootstrap SHARED IMPORTED GLOBAL)
+if(arch STREQUAL "x64")
+  set(BARE_WIN_UI_SELF_CONTAINED TRUE)
 
-add_dependencies(WindowsAppSDK_Bootstrap WindowsAppSDK_Foundation)
+  set(
+    BARE_WIN_UI_WINDOWS_APP_RUNTIME_AUTO_INITIALIZER
+    "${WindowsAppSDK_Foundation_SOURCE_DIR}/include/WindowsAppRuntimeAutoInitializer.cpp"
+  )
+  set(
+    BARE_WIN_UI_UNDOCKED_REG_FREE_WINRT_AUTO_INITIALIZER
+    "${WindowsAppSDK_Foundation_SOURCE_DIR}/include/UndockedRegFreeWinRT-AutoInitializer.cpp"
+  )
 
-set_target_properties(
-  WindowsAppSDK_Bootstrap
-  PROPERTIES
-  IMPORTED_LOCATION "${WindowsAppSDK_Foundation_SOURCE_DIR}/runtimes/win-${arch}/native/Microsoft.WindowsAppRuntime.Bootstrap.dll"
-  IMPORTED_IMPLIB "${WindowsAppSDK_Foundation_SOURCE_DIR}/lib/native/${arch}/Microsoft.WindowsAppRuntime.Bootstrap.lib"
-)
+  set(
+    BARE_WIN_UI_WINDOWS_APP_RUNTIME_DLL
+    "${WindowsAppSDK_Foundation_SOURCE_DIR}/runtimes-framework/win-x64/native/Microsoft.WindowsAppRuntime.dll"
+  )
+  set(
+    BARE_WIN_UI_WINDOWS_APP_RUNTIME_LIB
+    "${WindowsAppSDK_Foundation_SOURCE_DIR}/lib/native/x64/Microsoft.WindowsAppRuntime.lib"
+  )
+  set(
+    BARE_WIN_UI_WINDOWS_APP_RUNTIME_BUILD_DIR
+    "${CMAKE_CURRENT_BINARY_DIR}/windows-app-sdk-runtime"
+  )
+  set(
+    BARE_WIN_UI_WINDOWS_APP_RUNTIME_BUILD_DLL
+    "${BARE_WIN_UI_WINDOWS_APP_RUNTIME_BUILD_DIR}/Microsoft.WindowsAppRuntime.dll"
+  )
+  set(
+    BARE_WIN_UI_WINDOWS_APP_RUNTIME_BUILD_LIB
+    "${BARE_WIN_UI_WINDOWS_APP_RUNTIME_BUILD_DIR}/Microsoft.WindowsAppRuntime.lib"
+  )
+
+  add_custom_command(
+    OUTPUT
+      ${BARE_WIN_UI_WINDOWS_APP_RUNTIME_BUILD_DLL}
+      ${BARE_WIN_UI_WINDOWS_APP_RUNTIME_BUILD_LIB}
+    COMMAND
+      ${CMAKE_COMMAND} -E make_directory "${BARE_WIN_UI_WINDOWS_APP_RUNTIME_BUILD_DIR}"
+    COMMAND
+      ${CMAKE_COMMAND} -E copy_if_different
+      "${BARE_WIN_UI_WINDOWS_APP_RUNTIME_DLL}"
+      "${BARE_WIN_UI_WINDOWS_APP_RUNTIME_BUILD_DLL}"
+    COMMAND
+      ${CMAKE_COMMAND} -E copy_if_different
+      "${BARE_WIN_UI_WINDOWS_APP_RUNTIME_LIB}"
+      "${BARE_WIN_UI_WINDOWS_APP_RUNTIME_BUILD_LIB}"
+    DEPENDS ${WindowsAppSDK_Foundation}
+    VERBATIM
+  )
+
+  add_custom_target(
+    WindowsAppRuntimeFiles
+    DEPENDS
+      ${BARE_WIN_UI_WINDOWS_APP_RUNTIME_BUILD_DLL}
+      ${BARE_WIN_UI_WINDOWS_APP_RUNTIME_BUILD_LIB}
+  )
+
+  add_library(WindowsAppRuntime SHARED IMPORTED GLOBAL)
+
+  add_dependencies(WindowsAppRuntime WindowsAppRuntimeFiles)
+
+  set_target_properties(
+    WindowsAppRuntime
+    PROPERTIES
+    IMPORTED_LOCATION "${BARE_WIN_UI_WINDOWS_APP_RUNTIME_BUILD_DLL}"
+    IMPORTED_IMPLIB "${BARE_WIN_UI_WINDOWS_APP_RUNTIME_BUILD_LIB}"
+  )
+else()
+  set(BARE_WIN_UI_SELF_CONTAINED FALSE)
+
+  add_library(WindowsAppSDK_Bootstrap SHARED IMPORTED GLOBAL)
+
+  add_dependencies(WindowsAppSDK_Bootstrap WindowsAppSDK_Foundation)
+
+  set_target_properties(
+    WindowsAppSDK_Bootstrap
+    PROPERTIES
+    IMPORTED_LOCATION "${WindowsAppSDK_Foundation_SOURCE_DIR}/runtimes/win-${arch}/native/Microsoft.WindowsAppRuntime.Bootstrap.dll"
+    IMPORTED_IMPLIB "${WindowsAppSDK_Foundation_SOURCE_DIR}/lib/native/${arch}/Microsoft.WindowsAppRuntime.Bootstrap.lib"
+  )
+endif()
 
 fetch_nuget_package(
   Microsoft.WindowsAppSDK.Widgets
   1.8.250904007
   WindowsAppSDK_Widgets
+  SHA256 b15c6d06c599fb2a8d9a0582546d79fc68925ec3906689c514770ccf7e0f3457
   BUILD_COMMAND
     "${CppWinRT_SOURCE_DIR}/bin/cppwinrt.exe"
     -ref sdk
@@ -279,6 +366,7 @@ fetch_nuget_package(
   Microsoft.WindowsAppSDK.WinUI
   1.8.251105000
   WindowsAppSDK_WinUI
+  SHA256 ac8a8680b957598b1ceb696ca91168585735036488654c34e8f072574b351347
   BUILD_COMMAND
     "${CppWinRT_SOURCE_DIR}/bin/cppwinrt.exe"
     -ref sdk
@@ -306,6 +394,7 @@ fetch_nuget_package(
   Microsoft.WindowsAppSDK
   1.8.251106002
   WindowsAppSDK
+  SHA256 715b600661b12f77b23d4a0f9c303fdaed5e7eee05cc97c0289c331416835f64
   BUILD_COMMAND
     "${CppWinRT_SOURCE_DIR}/bin/cppwinrt.exe"
     -ref sdk

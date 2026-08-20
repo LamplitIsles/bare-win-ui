@@ -1,0 +1,22 @@
+set(_bare_win_ui_payload_root
+  "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/@target@/bare"
+)
+
+execute_process(
+  COMMAND
+    "@BARE_WIN_UI_NODE_EXECUTABLE@"
+    "@BARE_WIN_UI_MANIFEST_TOOL@"
+    generate
+    "${_bare_win_ui_payload_root}"
+  RESULT_VARIABLE _bare_win_ui_manifest_result
+  OUTPUT_VARIABLE _bare_win_ui_manifest_output
+  ERROR_VARIABLE _bare_win_ui_manifest_error
+)
+
+if(NOT _bare_win_ui_manifest_result EQUAL 0)
+  message(
+    FATAL_ERROR
+    "Unable to generate self-contained runtime manifest:\n"
+    "${_bare_win_ui_manifest_output}${_bare_win_ui_manifest_error}"
+  )
+endif()
