@@ -284,25 +284,31 @@ function Run-ExpectedFailure([string]$Label, [string]$Executable, [string]$Worki
   $psi = New-ProcessStartInfo $Executable $WorkingDirectory $UserData
   $process = New-Object Diagnostics.Process
   $process.StartInfo = $psi
-  $loaderRejected = $false
   $started = $false
-  $exitCode = $null
+  $result = $null
   try {
     try {
       $started = $process.Start()
     } catch [System.ComponentModel.Win32Exception] {
-      if ($_.Exception.NativeErrorCode -ne 126) { throw }
-      $loaderRejected = $true
+      $nativeErrorCode = [int]$_.Exception.NativeErrorCode
+      if ($nativeErrorCode -ne 126) { throw }
+      $result = [pscustomobject]@{
+        Category = 'loader'
+        Code = $nativeErrorCode
+      }
     }
 
-    if (-not $loaderRejected) {
+    if ($null -eq $result) {
       if (-not $started) { throw "Process did not start: $Executable" }
       if (-not $process.WaitForExit(30000)) {
         [void]$process.Kill()
         throw "$Label process timed out"
       }
-      $exitCode = $process.ExitCode
-      if ($exitCode -eq 0) {
+      $result = [pscustomobject]@{
+        Category = 'exit'
+        Code = [int]$process.ExitCode
+      }
+      if ($result.Code -eq 0) {
         throw "$Label unexpectedly exited successfully"
       }
     }
@@ -313,11 +319,7 @@ function Run-ExpectedFailure([string]$Label, [string]$Executable, [string]$Worki
     $process.Dispose()
   }
 
-  if ($loaderRejected) {
-    Write-Output "$Label=PASS (Windows loader rejected dependency with error 126)"
-  } else {
-    Write-Output "$Label=PASS (exit $exitCode)"
-  }
+  return $result
 }
 
 try {
@@ -438,8 +440,18 @@ try {
   Remove-TestFile (Join-Path $missing 'bare-win-ui-application-constructed.marker')
   $missingData = Join-Path $missing 'WebView2'
   [void](New-Item -ItemType Directory -Path $missingData -Force -ErrorAction Stop)
-  Run-ExpectedFailure 'missing-import-nonzero' $missingExecutable $missing $missingData
+  $missingResult = Run-ExpectedFailure 'missing-import-nonzero' $missingExecutable $missing $missingData
+  if ($missingResult.Category -notin @('exit', 'loader')) {
+    throw "Missing import returned an unknown launch category: $($missingResult.Category)"
+  }
+  if ($missingResult.Code -eq 0) {
+    throw 'Missing imported DLL unexpectedly allowed startup'
+  }
+  if ($missingResult.Category -eq 'loader' -and $missingResult.Code -ne 126) {
+    throw "Missing import loader error was $($missingResult.Code), expected 126"
+  }
   Assert-Marker $missing $false
+  Write-Output "missing-import-nonzero=PASS ($($missingResult.Category) code $($missingResult.Code))"
 
   $altered = New-OwnedDirectory 'altered-import'
   Copy-DirectoryContents $sampleApp $altered
@@ -453,8 +465,15 @@ try {
   Remove-TestFile (Join-Path $altered 'bare-win-ui-application-constructed.marker')
   $alteredData = Join-Path $altered 'WebView2'
   [void](New-Item -ItemType Directory -Path $alteredData -Force -ErrorAction Stop)
-  Run-ExpectedFailure 'altered-import-nonzero' $alteredExecutable $altered $alteredData
+  $alteredResult = Run-ExpectedFailure 'altered-import-nonzero' $alteredExecutable $altered $alteredData
+  if ($alteredResult.Category -notin @('exit', 'loader')) {
+    throw "Altered import returned an unknown launch category: $($alteredResult.Category)"
+  }
+  if ($alteredResult.Code -eq 0) {
+    throw 'Altered imported DLL unexpectedly allowed startup'
+  }
   Assert-Marker $altered $false
+  Write-Output "altered-import-nonzero=PASS ($($alteredResult.Category) code $($alteredResult.Code))"
 } finally {
   if ($null -ne $ownedStagingChild) {
     $ownedItem = Get-Item -LiteralPath $ownedStagingChild -Force -ErrorAction SilentlyContinue
